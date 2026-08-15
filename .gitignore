@@ -1,0 +1,72 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+dist*/
+*.tsbuildinfo
+coverage/
+.cache/
+cache/
+tmp/
+temp/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+*.jks
+*.keystore
+*.kdb
+*.csr
+
+# Runtime data, logs and backups
+logs/
+*.log
+backups/
+backup*/
+uploads/
+attachments/
+user-files/
+profile-photos/
+sessions/
+data/
+database/
+dumps/
+server/data/
+server/data*/
+server-data/
+*.db
+*.sqlite
+*.sqlite3
+*.bak
+*.backup
+*.dump
+*.tar
+*.tar.gz
+*.zip
+runtime/
+
+# Local production snapshots and generated historical copies
+src.pre-*/
+server.pre-*/
+dist.pre-*/
+dist.old-*/
+*.old
+*.tmp
+/tmp/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Production VM deployment scripts may contain environment-specific paths/IPs
+deploy/

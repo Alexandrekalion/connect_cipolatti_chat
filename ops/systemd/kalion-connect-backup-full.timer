@@ -1,0 +1,10 @@
+[Unit]
+Description=Executa backup FULL semanal do Kalion Connect aos domingos 19:00
+
+[Timer]
+OnCalendar=Sun *-*-* 19:00:00
+Persistent=true
+Unit=kalion-connect-backup-full.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Executa backup diferencial do Kalion Connect quatro vezes ao dia
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:00:00
+Persistent=true
+Unit=kalion-connect-backup.service
+
+[Install]
+WantedBy=timers.target

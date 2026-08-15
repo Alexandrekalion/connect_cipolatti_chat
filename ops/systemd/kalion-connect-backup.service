@@ -1,0 +1,11 @@
+[Unit]
+Description=Backup diferencial do Kalion Connect
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kalion-connect-backup.sh diff
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
