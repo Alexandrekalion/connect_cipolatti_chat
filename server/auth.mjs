@@ -126,6 +126,9 @@ function publicUser(user, permissions) {
     jobTitle: user.jobTitle || user.cargo || "",
     phone: user.phone || "",
     extension: user.extension || user.ramal || "",
+    mobile: user.mobile || "",
+    company: user.company || "",
+    lastSeenAt: user.lastSeenAt || "",
     signature: user.signature || "",
     preferences: user.preferences || {},
     status: user.status || "Offline",
@@ -315,7 +318,7 @@ async function authenticateActiveDirectory(identifier, password) {
     filter,
     attributes: [
       "distinguishedName", "sAMAccountName", "userPrincipalName", "displayName", "mail",
-      "department", "title", "telephoneNumber", "mobile", "thumbnailPhoto", "memberOf",
+      "department", "title", "telephoneNumber", "mobile", "company", "thumbnailPhoto", "memberOf",
       "userAccountControl", "objectGUID", "pwdLastSet", "lockoutTime", "accountExpires",
       "msDS-UserPasswordExpiryTimeComputed",
     ],
@@ -365,7 +368,7 @@ async function loadActiveDirectoryUserByUsername(username) {
     filter: `(&(objectClass=user)(sAMAccountName=${ldapEscape(username)}))`,
     attributes: [
       "distinguishedName", "sAMAccountName", "userPrincipalName", "displayName", "mail",
-      "department", "title", "telephoneNumber", "mobile", "thumbnailPhoto", "memberOf",
+      "department", "title", "telephoneNumber", "mobile", "company", "thumbnailPhoto", "memberOf",
       "userAccountControl", "objectGUID", "pwdLastSet", "lockoutTime", "accountExpires",
       "msDS-UserPasswordExpiryTimeComputed",
     ],
@@ -378,7 +381,7 @@ async function loadActiveDirectoryUserByUsername(username) {
 
 function adUserSnapshot(entry, role) {
   const username = normalizeCredential(firstAttr(entry, "sAMAccountName"));
-  const email = normalizeCredential(firstAttr(entry, "mail") || firstAttr(entry, "userPrincipalName") || `${username}@${config.domain || "example.local"}`);
+  const email = normalizeCredential(firstAttr(entry, "mail") || firstAttr(entry, "userPrincipalName") || `${username}@${adConfig().domain || "example.local"}`);
   const displayName = firstAttr(entry, "displayName") || username;
   const loginAliases = uniqueCredentials([email, username, firstAttr(entry, "userPrincipalName")])
     .filter((alias) => alias !== LOCAL_ADMIN_USERNAME);
@@ -394,10 +397,70 @@ function adUserSnapshot(entry, role) {
     role,
     department: firstAttr(entry, "department") || "",
     jobTitle: firstAttr(entry, "title") || "",
-    phone: firstAttr(entry, "mobile") || firstAttr(entry, "telephoneNumber") || "",
+    phone: firstAttr(entry, "telephoneNumber") || firstAttr(entry, "mobile") || "",
     extension: firstAttr(entry, "telephoneNumber") || "",
+    mobile: firstAttr(entry, "mobile") || "",
+    company: firstAttr(entry, "company") || "",
     loginAliases,
   };
+}
+
+const AD_SYNC_FIELDS = [
+  "adObjectGuid",
+  "adDistinguishedName",
+  "adPwdLastSet",
+  "adPasswordExpiresAt",
+  "name",
+  "displayName",
+  "email",
+  "username",
+  "role",
+  "department",
+  "jobTitle",
+  "phone",
+  "extension",
+  "mobile",
+  "company",
+  "loginAliases",
+];
+
+function sameValue(left, right) {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return JSON.stringify(left || []) === JSON.stringify(right || []);
+  }
+  return String(left || "") === String(right || "");
+}
+
+function applyAdSnapshot(user, snapshot, extra = {}) {
+  const changed = [];
+  for (const field of AD_SYNC_FIELDS) {
+    const nextValue = field === "loginAliases"
+      ? uniqueCredentials(snapshot.loginAliases).filter((alias) => alias !== LOCAL_ADMIN_USERNAME)
+      : snapshot[field];
+    if (!sameValue(user[field], nextValue)) {
+      user[field] = nextValue;
+      changed.push(field);
+    }
+  }
+  const systemFields = {
+    authProvider: "ad",
+    accessStatus: "Ativo",
+    mustChangePassword: false,
+    failedAttempts: 0,
+    lockedUntil: null,
+    initials: initials(snapshot.name),
+    ...extra,
+  };
+  for (const [field, nextValue] of Object.entries(systemFields)) {
+    if (!sameValue(user[field], nextValue)) {
+      user[field] = nextValue;
+      if (["authProvider", "accessStatus", "initials"].includes(field)) changed.push(field);
+    }
+  }
+  delete user.passwordHash;
+  delete user.passwordSalt;
+  if (changed.length) user.updatedAt = new Date().toISOString();
+  return changed;
 }
 
 async function passwordRecord(password) {
@@ -785,27 +848,7 @@ export async function login(identifier, password, request, remember = false) {
           error.status = 409;
           throw error;
         }
-        const before = {
-          name: user.name, email: user.email, username: user.username, role: user.role,
-          department: user.department, jobTitle: user.jobTitle, phone: user.phone,
-        };
-        Object.assign(user, {
-          ...snapshot,
-          authProvider: "ad",
-          accessStatus: "Ativo",
-          status: user.status || "Online",
-          mustChangePassword: false,
-          failedAttempts: 0,
-          lockedUntil: null,
-          initials: initials(snapshot.name),
-          updatedAt: new Date().toISOString(),
-        });
-        user.loginAliases = uniqueCredentials(user.loginAliases).filter((alias) => alias !== LOCAL_ADMIN_USERNAME);
-        delete user.passwordHash;
-        delete user.passwordSalt;
-        syncedFields = Object.entries(before)
-          .filter(([key, value]) => value !== user[key])
-          .map(([key]) => key);
+        syncedFields = applyAdSnapshot(user, snapshot, { status: user.status || "Offline" });
         if (syncedFields.length) {
           data.auditLogs ||= [];
           data.auditLogs.unshift({
@@ -906,18 +949,7 @@ export async function authenticate(request, options = {}) {
         authResult = { status: 401, code: AD_PASSWORD_CHANGED_CODE, title: AD_PASSWORD_CHANGED_TITLE, error: AD_PASSWORD_CHANGED_MESSAGE, clearSession: true, clearRemember: true };
         return;
       }
-      Object.assign(currentUser, {
-        ...ad.snapshot,
-        authProvider: "ad",
-        accessStatus: "Ativo",
-        mustChangePassword: false,
-        failedAttempts: 0,
-        lockedUntil: null,
-        initials: initials(ad.snapshot.name),
-        updatedAt: new Date().toISOString(),
-      });
-      delete currentUser.passwordHash;
-      delete currentUser.passwordSalt;
+      applyAdSnapshot(currentUser, ad.snapshot);
       Object.assign(current, {
         objectGUID: ad.snapshot.adObjectGuid,
         pwdLastSet: ad.snapshot.adPwdLastSet || "",
@@ -982,20 +1014,7 @@ export async function restoreRememberedSession(request) {
       result = { code: AD_PASSWORD_CHANGED_CODE, title: AD_PASSWORD_CHANGED_TITLE, error: AD_PASSWORD_CHANGED_MESSAGE, status: 401, clearRemember: true };
       return;
     }
-    Object.assign(user, {
-      ...ad.snapshot,
-      authProvider: "ad",
-      accessStatus: "Ativo",
-      mustChangePassword: false,
-      failedAttempts: 0,
-      lockedUntil: null,
-      initials: initials(ad.snapshot.name),
-      updatedAt: new Date().toISOString(),
-      lastLoginAt: new Date().toISOString(),
-    });
-    user.loginAliases = uniqueCredentials(user.loginAliases).filter((alias) => alias !== LOCAL_ADMIN_USERNAME);
-    delete user.passwordHash;
-    delete user.passwordSalt;
+    applyAdSnapshot(user, ad.snapshot, { lastLoginAt: new Date().toISOString() });
 
     const { token, session } = createSessionRecord(user, request, now);
     data.sessions = (data.sessions || []).filter((item) => new Date(item.expiresAt).getTime() > now && new Date(item.idleExpiresAt).getTime() > now);

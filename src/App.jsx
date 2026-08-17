@@ -299,6 +299,46 @@ function mediaUrl(path) {
   return path ? apiUrl(path) : "";
 }
 
+function websocketApiUrl(path) {
+  const target = new URL(apiUrl(path), window.location.origin);
+  target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+  return target.toString();
+}
+
+function normalizePresenceStatus(value = "") {
+  const raw = String(value || "").toLowerCase();
+  if (raw.includes("ausente")) return "Ausente";
+  if (raw.includes("online") || raw.includes("ativo")) return "Online";
+  return "Offline";
+}
+
+function mergeUserPresence(user = {}, presenceByUserId = {}) {
+  const presence = presenceByUserId[user.id] || user.presence || {};
+  const status = normalizePresenceStatus(presence.status || user.status || "Offline");
+  return {
+    ...user,
+    status,
+    lastSeenAt: presence.lastSeenAt || user.lastSeenAt || "",
+    presence: { ...presence, userId: user.id, status },
+  };
+}
+
+function formatPresenceLastSeen(value = "") {
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  return `Visto por último às ${date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function PresenceIndicator({ user, showLabel = false }) {
+  const status = normalizePresenceStatus(user?.presence?.status || user?.status || "Offline");
+  const lastSeen = status === "Offline" ? formatPresenceLastSeen(user?.presence?.lastSeenAt || user?.lastSeenAt) : "";
+  return <span className={`presence-indicator presence-${status.toLowerCase()}`} title={lastSeen || status}>
+    <i />
+    {showLabel && <small>{status === "Offline" && lastSeen ? lastSeen : status}</small>}
+  </span>;
+}
+
 function createClientMessageId() {
   if (window.crypto?.randomUUID) return window.crypto.randomUUID();
   return `client-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -658,6 +698,7 @@ function mapInternalConversation(conversation, currentUser) {
     transferred: false,
     initials: (title || "CI").split(" ").map((item) => item[0]).slice(0, 2).join("").toUpperCase(),
     participantUsers: conversation.participantUsers || [],
+    otherUser: isGroup ? null : otherUser || null,
     otherUserOutOfOffice: isGroup ? null : otherUser?.outOfOffice || null,
     photoUrl: isGroup ? conversation.imageUrl || "" : otherUser?.photoUrl || "",
     color: isGroup ? "#c49a2c" : "#536f8b",
@@ -1269,6 +1310,7 @@ function mergeConversationDefaults(stored, fallback) {
 function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] }) {
   const [conversations, setConversations] = useState([]);
   const [collaborators, setCollaborators] = useState([]);
+  const [presenceByUserId, setPresenceByUserId] = useState({});
   const [selectedId, setSelectedId] = useState(null);
   const [mobileChat, setMobileChat] = useState(false);
   const [filter, setFilter] = useState("Todos");
@@ -1324,8 +1366,19 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   const draftStorageKey = currentUser?.id ? `cipolatti_chat_drafts_${currentUser.id}` : "";
   const isAdmin = currentUser.role === "Administrador";
   const isManager = currentUser.role === "Gestor" || currentUser.role === "Supervisor";
+  const collaboratorsWithPresence = useMemo(() =>
+    collaborators.map((user) => mergeUserPresence(user, presenceByUserId)),
+  [collaborators, presenceByUserId]);
+  const conversationsWithPresence = useMemo(() => internal
+    ? conversations.map((conversation) => {
+      const participantUsers = (conversation.participantUsers || []).map((user) => mergeUserPresence(user, presenceByUserId));
+      const otherUser = conversation.type === "group" ? null : participantUsers.find((user) => user.id !== currentUser?.id) || conversation.otherUser || null;
+      return { ...conversation, participantUsers, otherUser };
+    })
+    : conversations,
+  [conversations, currentUser?.id, internal, presenceByUserId]);
   const accessibleConversations = internal
-    ? conversations
+    ? conversationsWithPresence
     : conversations.filter((conversation) => isAdmin || conversation.department === currentUser.dept || conversation.owner === currentUser.name || conversation.participants?.includes(currentUser.name));
   const scopedConversations = groupOnly ? accessibleConversations.filter((conversation) => conversation.type === "group") : accessibleConversations;
   const current = scopedConversations.find((conversation) => conversation.id === selectedId) || null;
@@ -1360,6 +1413,68 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
       document.body.classList.remove("cipolatti-mobile-chat-active");
     };
   }, [internal, mobileChat]);
+
+  useEffect(() => {
+    if (!internal || !currentUser?.id) return undefined;
+    let socket = null;
+    let reconnectTimer = 0;
+    let heartbeatTimer = 0;
+    let closed = false;
+    let lastActivitySent = 0;
+    const mergePresenceRows = (rows = []) => {
+      setPresenceByUserId((currentMap) => {
+        const next = { ...currentMap };
+        for (const row of rows) if (row?.userId) next[row.userId] = row;
+        return next;
+      });
+    };
+    const markSelfOnline = () => mergePresenceRows([{ userId: currentUser.id, status: "Online", online: true, away: false, lastSeenAt: "" }]);
+    const sendPresence = (type) => {
+      if (socket?.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type, at: Date.now() }));
+    };
+    const sendActivity = () => {
+      const now = Date.now();
+      if (now - lastActivitySent < 10_000) return;
+      lastActivitySent = now;
+      sendPresence("presence:activity");
+    };
+    const connect = () => {
+      if (closed) return;
+      socket = new WebSocket(websocketApiUrl("/api/presence"));
+      socket.onopen = () => {
+        markSelfOnline();
+        sendPresence("presence:activity");
+        heartbeatTimer = window.setInterval(() => sendPresence("presence:heartbeat"), 30_000);
+      };
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (Array.isArray(payload.users)) mergePresenceRows(payload.users);
+        } catch {}
+      };
+      socket.onclose = () => {
+        window.clearInterval(heartbeatTimer);
+        if (!closed) reconnectTimer = window.setTimeout(connect, 5000);
+      };
+      socket.onerror = () => socket?.close();
+    };
+    apiRequest("/api/presence").then(mergePresenceRows).catch(() => {});
+    const pollTimer = window.setInterval(() => apiRequest("/api/presence").then(mergePresenceRows).catch(() => {}), 30_000);
+    connect();
+    const activityEvents = ["pointerdown", "keydown", "touchstart", "focus"];
+    activityEvents.forEach((eventName) => window.addEventListener(eventName, sendActivity, { passive: true }));
+    document.addEventListener("visibilitychange", sendActivity);
+    return () => {
+      closed = true;
+      window.clearTimeout(reconnectTimer);
+      window.clearInterval(heartbeatTimer);
+      window.clearInterval(pollTimer);
+      activityEvents.forEach((eventName) => window.removeEventListener(eventName, sendActivity));
+      document.removeEventListener("visibilitychange", sendActivity);
+      socket?.close();
+    };
+  }, [currentUser?.id, internal]);
 
   useEffect(() => {
     const textarea = composerTextRef.current;
@@ -2276,7 +2391,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   };
   const addParticipant = async (selection) => {
     const selectedUsers = (Array.isArray(selection) ? selection : [selection])
-      .map((item) => typeof item === "string" ? collaborators.find((user) => user.name === item) : item)
+      .map((item) => typeof item === "string" ? collaboratorsWithPresence.find((user) => user.name === item) : mergeUserPresence(item, presenceByUserId))
       .filter(Boolean);
     if (!selectedUsers.length) { setToast("Selecione pelo menos uma pessoa."); return; }
     if (internal && current?.id) {
@@ -2371,7 +2486,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   };
   const startConversation = (target) => {
     const user = typeof target === "string"
-      ? collaborators.find((item) => item.name === target || item.displayName === target || item.username === target || item.email === target)
+      ? collaboratorsWithPresence.find((item) => item.name === target || item.displayName === target || item.username === target || item.email === target)
       : target;
     if (!user) {
       setToast("Colaborador não encontrado ou sem acesso.");
@@ -2606,7 +2721,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
           {filteredConversations.map((conversation) => (
             <button key={conversation.id} className={`conversation-item ${conversation.unread ? "unread" : ""}`} onClick={() => { setSelectedId(conversation.id); setMobileChat(true); }}>
               <Avatar initials={conversation.initials} color={conversation.color} src={conversation.photoUrl} alt={conversation.name} />
-              <div><strong>{conversation.name}</strong><span className={draftPreview(conversation.id) ? "draft-preview" : ""}>{outOfOfficeLabel(conversation.otherUserOutOfOffice) || draftPreview(conversation.id) || conversation.preview}</span>{conversation.unread > 0 && <em className="unread-label">Não lido</em>}</div>
+              <div><strong>{conversation.name}{internal && conversation.otherUser && <PresenceIndicator user={conversation.otherUser} />}</strong><span className={draftPreview(conversation.id) ? "draft-preview" : ""}>{outOfOfficeLabel(conversation.otherUserOutOfOffice) || draftPreview(conversation.id) || conversation.preview}</span>{conversation.unread > 0 && <em className="unread-label">Não lido</em>}</div>
               <time>{conversation.time}{conversation.unread > 0 && <b title="Não lido">{conversation.unread > 9 ? "9+" : conversation.unread}</b>}{conversation.transferred && <b title="Transferido">T</b>}</time>
             </button>
           ))}
@@ -2615,8 +2730,8 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
       <main className="chat-main empty-selection-main">
         <div className="empty-chat"><MessageCircle /><h2>{scopedConversations.length ? "Selecione uma conversa para começar" : groupOnly ? "Nenhum grupo" : "Nenhuma conversa"}</h2><p className="panel-copy">{scopedConversations.length ? "Escolha uma conversa na lista ao lado." : groupOnly ? "Você ainda não participa de grupos." : "Você ainda não possui conversas."}</p><div className="empty-chat-actions">{groupOnly ? <button className="primary-button" onClick={() => setModal("new-group")}><Users size={16}/> Novo grupo</button> : <button className="primary-button" onClick={() => setModal("new-chat")}><Plus size={16}/> Nova conversa</button>}</div></div>
       </main>
-      {modal === "new-chat" && <NewConversationModal collaborators={collaborators} currentUser={currentUser} onClose={() => setModal("")} onConfirm={startConversation} />}
-      {modal === "new-group" && <GroupModal currentUser={currentUser} collaborators={collaborators} onClose={() => setModal("")} onConfirm={startGroup} />}
+      {modal === "new-chat" && <NewConversationModal collaborators={collaboratorsWithPresence} currentUser={currentUser} onClose={() => setModal("")} onConfirm={startConversation} />}
+      {modal === "new-group" && <GroupModal currentUser={currentUser} collaborators={collaboratorsWithPresence} onClose={() => setModal("")} onConfirm={startGroup} />}
       {blockedAttachmentAlert && <BlockedAttachmentModal {...blockedAttachmentAlert} onClose={() => setBlockedAttachmentAlert(null)} />}
       {largeAttachmentAlert && <LargeAttachmentModal {...largeAttachmentAlert} onClose={() => setLargeAttachmentAlert(null)} />}
       {toast && <Toast message={toast} tone="warning" onClose={() => setToast("")} />}
@@ -2636,7 +2751,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
           {filteredConversations.map((conversation) => (
             <button key={conversation.id} className={`conversation-item ${current.id === conversation.id ? "selected" : ""} ${conversation.unread ? "unread" : ""}`} onClick={() => { setSelectedId(conversation.id); setMobileChat(true); }}>
               <Avatar initials={conversation.initials} color={conversation.color} src={conversation.photoUrl} alt={conversation.name} />
-              <div><strong>{conversation.name}</strong><span className={draftPreview(conversation.id) ? "draft-preview" : ""}>{outOfOfficeLabel(conversation.otherUserOutOfOffice) || draftPreview(conversation.id) || conversation.preview}</span>{conversation.unread > 0 && <em className="unread-label">Não lido</em>}</div>
+              <div><strong>{conversation.name}{internal && conversation.otherUser && <PresenceIndicator user={conversation.otherUser} />}</strong><span className={draftPreview(conversation.id) ? "draft-preview" : ""}>{outOfOfficeLabel(conversation.otherUserOutOfOffice) || draftPreview(conversation.id) || conversation.preview}</span>{conversation.unread > 0 && <em className="unread-label">Não lido</em>}</div>
               <time>{conversation.time}{conversation.unread > 0 && <b title="Não lido">{conversation.unread > 9 ? "9+" : conversation.unread}</b>}{conversation.transferred && <b title="Transferido">T</b>}</time>
             </button>
           ))}
@@ -2648,7 +2763,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
         <header className="chat-contact-header">
           <button className="icon-button mobile-back" onClick={() => setMobileChat(false)} aria-label="Voltar para lista"><ChevronLeft size={22} /></button>
           <Avatar initials={current.initials} color={current.color} src={current.photoUrl} alt={current.name} />
-          <div><h2>{current.name} <span>●</span></h2><p>{internal ? <button type="button" className="header-participants-button" onClick={() => setModal("participants")}>{current.participants.length} participantes</button> : current.phone}</p>{internal && outOfOfficeLabel(current.otherUserOutOfOffice) && <small className="out-of-office-inline">{outOfOfficeLabel(current.otherUserOutOfOffice)}</small>}</div>
+          <div><h2>{current.name}</h2><p>{internal ? (current.type === "group" ? <button type="button" className="header-participants-button" onClick={() => setModal("participants")}>{current.participants.length} participantes</button> : <PresenceIndicator user={current.otherUser} showLabel />) : current.phone}</p>{internal && outOfOfficeLabel(current.otherUserOutOfOffice) && <small className="out-of-office-inline">{outOfOfficeLabel(current.otherUserOutOfOffice)}</small>}</div>
           <div className="chat-actions">
             {!internal && <button className="secondary-button" onClick={() => setModal("transfer")}><ArrowLeftRight size={17} /> Transferir</button>}
             {internal && <button className="secondary-button" onClick={() => setModal("shared-media")}><Paperclip size={17} /> Midias</button>}
@@ -2715,11 +2830,11 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
 
       {!internal && <ContactPanel contact={current} onToast={setToast} onEdit={() => setModal("contact")} onShortcut={(value) => updateComposerText(value)} />}
 
-      {modal === "new-chat" && <NewConversationModal collaborators={collaborators} currentUser={currentUser} onClose={() => setModal("")} onConfirm={startConversation} />}
-      {modal === "new-group" && <GroupModal currentUser={currentUser} collaborators={collaborators} onClose={() => setModal("")} onConfirm={startGroup} />}
+      {modal === "new-chat" && <NewConversationModal collaborators={collaboratorsWithPresence} currentUser={currentUser} onClose={() => setModal("")} onConfirm={startConversation} />}
+      {modal === "new-group" && <GroupModal currentUser={currentUser} collaborators={collaboratorsWithPresence} onClose={() => setModal("")} onConfirm={startGroup} />}
       {modal === "transfer" && <TransferModal onClose={() => setModal("")} onConfirm={transfer} />}
-      {modal === "participant" && <AddParticipantsModal conversation={current} directory={collaborators} onClose={() => setModal("")} onConfirm={addParticipant} />}
-      {modal === "participants" && <ParticipantsModal conversation={current} directory={collaborators} currentUser={currentUser} onAction={changeParticipantRole} onClose={() => setModal("")} />}
+      {modal === "participant" && <AddParticipantsModal conversation={current} directory={collaboratorsWithPresence} onClose={() => setModal("")} onConfirm={addParticipant} />}
+      {modal === "participants" && <ParticipantsModal conversation={current} directory={collaboratorsWithPresence} currentUser={currentUser} onAction={changeParticipantRole} onClose={() => setModal("")} />}
       {modal === "shared-media" && <SharedMediaModal conversation={current} onClose={() => setModal("")} onOpenMessage={openMessageInConversation} />}
       {modal === "contact" && <TextModal title="Editar contato" label="Nome do contato" initialValue={current.name} onClose={() => setModal("")} onConfirm={(value) => { updateCurrent((conversation) => ({ ...conversation, name: value })); setModal(""); }} />}
       {modal === "end" && <Modal title={internal ? "Encerrar conversa" : "Encerrar atendimento"} onClose={() => setModal("")} footer={<><button className="secondary-button" onClick={() => setModal("")}>Cancelar</button><button className="danger-button" onClick={endConversation}>Confirmar encerramento</button></>}><p>O histórico será preservado e uma nova conversa poderá ser iniciada a qualquer momento.</p></Modal>}
@@ -2974,7 +3089,7 @@ function NewConversationModal({ collaborators = [], currentUser, onClose, onConf
             <td>{user.jobTitle || user.role || "Usuário"}</td>
             <td>{user.dept || user.department || "Sem departamento"}</td>
             <td>{user.extension || user.ramal ? `Ramal ${user.extension || user.ramal}` : user.email || "-"}</td>
-            <td><Status>{user.outOfOffice?.active ? "Fora da empresa" : user.accessStatus === "Ativo" ? user.status || "Online" : user.accessStatus || user.status || "Ativo"}</Status></td>
+            <td>{user.outOfOffice?.active ? <Status>Fora da empresa</Status> : <PresenceIndicator user={user} showLabel />}</td>
             <td><button className="secondary-button compact-action" onClick={() => selectUser(user)}><MessageCircle size={15}/> Conversar</button></td>
           </tr>)}</tbody>
         </table>
@@ -3000,7 +3115,7 @@ function GroupModal({ currentUser, collaborators = [], onClose, onConfirm }) {
       <label className="modal-field"><span>Descricao opcional</span><input value={description} onChange={(event) => setDescription(event.target.value)} /></label>
       <label className="modal-field full"><span>Pesquisar participantes</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Nome, e-mail ou departamento" /></label>
     </div>
-    <div className="participant-picker group-picker">{candidates.map((user) => <label key={user.id} className={selected.includes(user.id) ? "selected" : ""}><input type="checkbox" checked={selected.includes(user.id)} onChange={() => toggle(user.id)} /><Avatar initials={user.initials} size="xs" src={user.photoUrl} alt={user.name}/><span><strong>{user.name}</strong><small>{user.role} - {user.department || user.dept}</small></span></label>)}</div>
+    <div className="participant-picker group-picker">{candidates.map((user) => <label key={user.id} className={selected.includes(user.id) ? "selected" : ""}><input type="checkbox" checked={selected.includes(user.id)} onChange={() => toggle(user.id)} /><Avatar initials={user.initials} size="xs" src={user.photoUrl} alt={user.name}/><span><strong>{user.name} <PresenceIndicator user={user} /></strong><small>{user.role} - {user.department || user.dept}</small></span></label>)}</div>
     <p className="transfer-note">O criador entra automaticamente e sera o administrador inicial do grupo.</p>
   </Modal>;
 }
@@ -3492,7 +3607,7 @@ function CollaboratorDirectoryPage({ currentUser, setPage }) {
   return <div className="content-page">
     <div className="section-toolbar"><div className="title-icon"><Users/><div><h2>Colaboradores</h2><p>Diretório interno para iniciar conversas corporativas.</p></div></div><button className="secondary-button" onClick={load}><RefreshCw size={16}/> Atualizar</button></div>
     <div className="filter-bar panel"><label><Search size={17}/><input value={query} onChange={(event)=>setQuery(event.target.value)} placeholder="Buscar por nome, cargo, departamento, e-mail ou ramal..." /></label><span className="select-button">{rows.length} ativos</span></div>
-    <article className="panel data-table-panel collaborator-directory-panel"><div className="table-scroll"><table className="collaborator-directory-table"><thead><tr><th>Colaborador</th><th>Cargo</th><th>Departamento</th><th>Ramal / e-mail</th><th>Status</th><th>Conversa</th></tr></thead><tbody>{visible.map((user) => <tr key={user.id}><td><div className="table-person collaborator-person"><Avatar initials={user.initials} src={user.photoUrl || user.avatarUrl} alt={user.name} size="md"/><span><strong>{user.displayName || user.name}</strong><small>{outOfOfficeLabel(user.outOfOffice) || user.email || "Sem e-mail cadastrado"}</small></span></div></td><td>{user.jobTitle || user.role || "Colaborador"}</td><td>{user.department || "Sem departamento"}</td><td>{user.extension ? `Ramal ${user.extension}` : user.email || "-"}</td><td><Status>{user.outOfOffice?.active ? "Fora da empresa" : user.status || user.accessStatus || "Ativo"}</Status></td><td><button className="secondary-button compact-action" onClick={() => startConversation(user)}><MessageCircle size={15}/> Conversar</button></td></tr>)}</tbody></table></div></article>
+    <article className="panel data-table-panel collaborator-directory-panel"><div className="table-scroll"><table className="collaborator-directory-table"><thead><tr><th>Colaborador</th><th>Cargo</th><th>Departamento</th><th>Ramal / e-mail</th><th>Status</th><th>Conversa</th></tr></thead><tbody>{visible.map((user) => <tr key={user.id}><td><div className="table-person collaborator-person"><Avatar initials={user.initials} src={user.photoUrl || user.avatarUrl} alt={user.name} size="md"/><span><strong>{user.displayName || user.name}</strong><small>{outOfOfficeLabel(user.outOfOffice) || user.email || "Sem e-mail cadastrado"}</small></span></div></td><td>{user.jobTitle || user.role || "Colaborador"}</td><td>{user.department || "Sem departamento"}</td><td>{user.extension ? `Ramal ${user.extension}` : user.email || "-"}</td><td>{user.outOfOffice?.active ? <Status>Fora da empresa</Status> : <PresenceIndicator user={user} showLabel />}</td><td><button className="secondary-button compact-action" onClick={() => startConversation(user)}><MessageCircle size={15}/> Conversar</button></td></tr>)}</tbody></table></div></article>
     {!visible.length && <div className="empty-result">Nenhum colaborador encontrado.</div>}
     {toast && <Toast message={toast} tone={toast.includes("erro") ? "warning" : "success"} onClose={()=>setToast("")}/>}
   </div>;
@@ -3527,7 +3642,7 @@ function CollaboratorsPage({ setPage, currentUser, onCurrentUserUpdated }) {
     return haystack.includes(normalizeSearchText(query).trim());
   }));
   const allowedDepartments=currentUser.role==="Administrador"?configuredDepartments:configuredDepartments.filter((item)=>item.name===currentUser.dept);
-  return <div className="content-page"><div className="section-toolbar"><div className="title-icon"><Users/><div><h2>Usuários</h2><p>Diretório corporativo interno para localizar pessoas e iniciar conversas.</p></div></div>{canCreate&&<button className="primary-button" disabled={!allowedDepartments.length} onClick={()=>setModal(true)}><UserPlus size={17}/> Novo usuário</button>}</div><div className="filter-bar panel"><label><Search size={17}/><input value={query} onChange={(event)=>setQuery(event.target.value)} placeholder="Buscar por nome, cargo, departamento, e-mail, ramal ou status..."/></label><button className="secondary-button" onClick={load}><RefreshCw size={16}/> Atualizar</button><span className="select-button">{visibleRows.length} usuários</span></div><article className="panel data-table-panel users-directory-panel"><div className="table-scroll"><table className="users-directory-table"><thead><tr><th>Usuário</th><th>Cargo</th><th>Departamento</th><th>Ramal / e-mail</th><th>Status</th><th>Conversa</th>{rows.some(canEditUser)&&<th>Ações</th>}</tr></thead><tbody>{visibleRows.map((user)=><tr key={user.id}><td><div className="table-person collaborator-person"><Avatar initials={user.initials} size="md" src={user.photoUrl} alt={user.name}/><span><strong>{user.displayName||user.name}</strong><small>{outOfOfficeLabel(user.outOfOffice)||user.email||user.username||"Sem e-mail cadastrado"}</small></span></div></td><td>{user.jobTitle||user.role||"Usuário"}</td><td>{user.dept||user.department||"Sem departamento"}</td><td>{user.extension?`Ramal ${user.extension}`:user.email||"-"}</td><td><Status>{user.outOfOffice?.active?"Fora da empresa":user.accessStatus==="Ativo"?(user.status||"Online"):user.accessStatus}</Status></td><td><button className="secondary-button compact-action" disabled={user.id===currentUser.id||user.accessStatus!=="Ativo"} onClick={()=>startConversation(user)}><MessageCircle size={15}/> Conversar</button></td>{rows.some(canEditUser)&&<td>{canEditUser(user)?<div className="row-actions"><button className="secondary-button compact-action" onClick={()=>setEditing({...user,originalEmail:user.email})}><Pencil size={15}/> Editar</button>{currentUser.role==="Administrador"&&<button className="icon-button danger-icon" disabled={user.id===currentUser.id} onClick={()=>setDeleting({email:user.email,name:user.name,role:user.role})} title={user.id===currentUser.id?"Não é possível excluir a conta conectada":"Excluir usuário"}><Trash2 size={16}/></button>}</div>:<span className="muted-cell">Somente leitura</span>}</td>}</tr>)}</tbody></table></div></article>{!visibleRows.length&&<div className="empty-result">Nenhum usuário encontrado.</div>}{modal&&<CollaboratorModal departments={allowedDepartments} accounts={accounts} allowedRoles={["Administrador","Gestor","Usuário"]} onClose={()=>setModal(false)} onConfirm={addCollaborator}/>} {editing&&<EditCollaboratorModal initial={editing} departments={configuredDepartments} accounts={accounts} currentUser={currentUser} onClose={()=>setEditing(null)} onConfirm={editCollaborator}/>} {deleting&&<Modal title={`Excluir ${deleting.name}`} onClose={()=>setDeleting(null)} footer={<><button className="secondary-button" onClick={()=>setDeleting(null)}>Cancelar</button><button className="danger-button" onClick={deleteCollaborator}><Trash2 size={16}/> Excluir definitivamente</button></>}><div className="delete-warning"><Trash2/><div><strong>O acesso e o cadastro serão removidos.</strong><p>Mensagens e autoria histórica serão preservadas nas conversas existentes.</p></div></div></Modal>} {toast&&<Toast message={toast} tone={toast.includes("não")||toast.includes("erro")?"warning":"success"} onClose={()=>setToast("")}/>}</div>;
+  return <div className="content-page"><div className="section-toolbar"><div className="title-icon"><Users/><div><h2>Usuários</h2><p>Diretório corporativo interno para localizar pessoas e iniciar conversas.</p></div></div>{canCreate&&<button className="primary-button" disabled={!allowedDepartments.length} onClick={()=>setModal(true)}><UserPlus size={17}/> Novo usuário</button>}</div><div className="filter-bar panel"><label><Search size={17}/><input value={query} onChange={(event)=>setQuery(event.target.value)} placeholder="Buscar por nome, cargo, departamento, e-mail, ramal ou status..."/></label><button className="secondary-button" onClick={load}><RefreshCw size={16}/> Atualizar</button><span className="select-button">{visibleRows.length} usuários</span></div><article className="panel data-table-panel users-directory-panel"><div className="table-scroll"><table className="users-directory-table"><thead><tr><th>Usuário</th><th>Cargo</th><th>Departamento</th><th>Ramal / e-mail</th><th>Status</th><th>Conversa</th>{rows.some(canEditUser)&&<th>Ações</th>}</tr></thead><tbody>{visibleRows.map((user)=><tr key={user.id}><td><div className="table-person collaborator-person"><Avatar initials={user.initials} size="md" src={user.photoUrl} alt={user.name}/><span><strong>{user.displayName||user.name}</strong><small>{outOfOfficeLabel(user.outOfOffice)||user.email||user.username||"Sem e-mail cadastrado"}</small></span></div></td><td>{user.jobTitle||user.role||"Usuário"}</td><td>{user.dept||user.department||"Sem departamento"}</td><td>{user.extension?`Ramal ${user.extension}`:user.email||"-"}</td><td>{user.outOfOffice?.active?<Status>Fora da empresa</Status>:user.accessStatus==="Ativo"?<PresenceIndicator user={user} showLabel />:<Status>{user.accessStatus}</Status>}</td><td><button className="secondary-button compact-action" disabled={user.id===currentUser.id||user.accessStatus!=="Ativo"} onClick={()=>startConversation(user)}><MessageCircle size={15}/> Conversar</button></td>{rows.some(canEditUser)&&<td>{canEditUser(user)?<div className="row-actions"><button className="secondary-button compact-action" onClick={()=>setEditing({...user,originalEmail:user.email})}><Pencil size={15}/> Editar</button>{currentUser.role==="Administrador"&&<button className="icon-button danger-icon" disabled={user.id===currentUser.id} onClick={()=>setDeleting({email:user.email,name:user.name,role:user.role})} title={user.id===currentUser.id?"Não é possível excluir a conta conectada":"Excluir usuário"}><Trash2 size={16}/></button>}</div>:<span className="muted-cell">Somente leitura</span>}</td>}</tr>)}</tbody></table></div></article>{!visibleRows.length&&<div className="empty-result">Nenhum usuário encontrado.</div>}{modal&&<CollaboratorModal departments={allowedDepartments} accounts={accounts} allowedRoles={["Administrador","Gestor","Usuário"]} onClose={()=>setModal(false)} onConfirm={addCollaborator}/>} {editing&&<EditCollaboratorModal initial={editing} departments={configuredDepartments} accounts={accounts} currentUser={currentUser} onClose={()=>setEditing(null)} onConfirm={editCollaborator}/>} {deleting&&<Modal title={`Excluir ${deleting.name}`} onClose={()=>setDeleting(null)} footer={<><button className="secondary-button" onClick={()=>setDeleting(null)}>Cancelar</button><button className="danger-button" onClick={deleteCollaborator}><Trash2 size={16}/> Excluir definitivamente</button></>}><div className="delete-warning"><Trash2/><div><strong>O acesso e o cadastro serão removidos.</strong><p>Mensagens e autoria histórica serão preservadas nas conversas existentes.</p></div></div></Modal>} {toast&&<Toast message={toast} tone={toast.includes("não")||toast.includes("erro")?"warning":"success"} onClose={()=>setToast("")}/>}</div>;
 }
 
 function CollaboratorModal({departments:availableDepartments,accounts,allowedRoles,onClose,onConfirm}) {
@@ -4830,6 +4945,52 @@ function ChangePasswordScreen({ account, onChanged, onLogout }) {
   return <div className="login-screen"><main className="login-panel password-change"><div className="login-heading"><span><KeyRound/></span><div><h1>Crie uma nova senha</h1><p>Este acesso utiliza uma senha temporária e precisa ser atualizado.</p></div></div><form onSubmit={save}>{!account.mustChangePassword&&<label><span>Senha atual</span><input type="password" value={currentPassword} onChange={(event)=>setCurrentPassword(event.target.value)}/></label>}<label><span>Nova senha</span><input type="password" value={password} onChange={(event)=>setPassword(event.target.value)}/></label><label><span>Confirmar nova senha</span><input type="password" value={confirm} onChange={(event)=>setConfirm(event.target.value)}/></label>{message&&<div className="login-message">{message}</div>}<button className="primary-button login-submit">Atualizar senha</button><button type="button" className="login-link" onClick={onLogout}>Cancelar e sair</button></form></main></div>;
 }
 
+function PresenceKeeper({ currentUser }) {
+  useEffect(() => {
+    if (!currentUser?.id) return undefined;
+    let socket = null;
+    let reconnectTimer = 0;
+    let heartbeatTimer = 0;
+    let closed = false;
+    let lastActivitySent = 0;
+    const sendPresence = (type) => {
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type, at: Date.now() }));
+    };
+    const sendActivity = () => {
+      const now = Date.now();
+      if (now - lastActivitySent < 10_000) return;
+      lastActivitySent = now;
+      sendPresence("presence:activity");
+    };
+    const connect = () => {
+      if (closed) return;
+      socket = new WebSocket(websocketApiUrl("/api/presence"));
+      socket.onopen = () => {
+        sendPresence("presence:activity");
+        heartbeatTimer = window.setInterval(() => sendPresence("presence:heartbeat"), 30_000);
+      };
+      socket.onclose = () => {
+        window.clearInterval(heartbeatTimer);
+        if (!closed) reconnectTimer = window.setTimeout(connect, 5000);
+      };
+      socket.onerror = () => socket?.close();
+    };
+    connect();
+    const activityEvents = ["pointerdown", "keydown", "touchstart", "focus"];
+    activityEvents.forEach((eventName) => window.addEventListener(eventName, sendActivity, { passive: true }));
+    document.addEventListener("visibilitychange", sendActivity);
+    return () => {
+      closed = true;
+      window.clearTimeout(reconnectTimer);
+      window.clearInterval(heartbeatTimer);
+      activityEvents.forEach((eventName) => window.removeEventListener(eventName, sendActivity));
+      document.removeEventListener("visibilitychange", sendActivity);
+      socket?.close();
+    };
+  }, [currentUser?.id]);
+  return null;
+}
+
 function App() {
   const [page, setPage] = useState("conversas");
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -4918,6 +5079,7 @@ function App() {
     : "default";
   return (
     <div className="app-shell" data-theme={theme} data-message-font-size={messageFontSize}>
+      <PresenceKeeper currentUser={currentUser} />
       <Sidebar page={page} setPage={setPage} mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} currentUser={currentUser} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} />
       <div className="app-main">
         <Topbar page={page} setPage={setPage} setMobileOpen={setMobileOpen} currentUser={currentUser} theme={theme} setTheme={updateTheme} onLogout={logout} onCurrentUserUpdated={setCurrentUser} />

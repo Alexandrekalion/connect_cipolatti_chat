@@ -22,6 +22,7 @@ import {
 } from "./auth.mjs";
 import { processIncomingMessage, processStatusEvent, runWaitingMessages } from "./triage.mjs";
 import { handleMeetingUpgrade } from "./meeting-signaling.mjs";
+import { attachPresence, handlePresenceUpgrade, listPresenceForActor, presenceDiagnosticsForActor } from "./presence.mjs";
 import {
   extractWebhookEvents, isMetaTestMessageEvent, listMessageTemplates, normalizeIncomingMessage, sendTemplate, sendText,
   serializeWhatsAppError, subscribeAppToWaba, testConnection, userFacingSendFailure,
@@ -149,7 +150,7 @@ async function auditWebhookReceipt({ request, raw, payload = null, signatureVali
 
 function publicDirectoryUser(user) {
   const outOfOffice = outOfOfficeStatus(user.outOfOffice);
-  return {
+  return attachPresence({
     id: user.id,
     name: user.name,
     displayName: user.displayName || user.name,
@@ -164,9 +165,12 @@ function publicDirectoryUser(user) {
     avatarUrl: user.photoUrl || "",
     phone: user.phone || "",
     extension: user.extension || user.ramal || "",
+    mobile: user.mobile || "",
+    company: user.company || "",
+    lastSeenAt: user.lastSeenAt || "",
     status: user.status || "Offline",
     outOfOffice,
-  };
+  });
 }
 
 function parseOutOfOfficeDate(value, boundary = "start") {
@@ -1142,7 +1146,14 @@ async function handleApi(request, response, url) {
 
 
   if (url.pathname === "/api/users" && request.method === "GET") {
-    return json(response, 200, await listUsers(request.auth));
+    const rows = await listUsers(request.auth);
+    return json(response, 200, rows.map(attachPresence));
+  }
+  if (url.pathname === "/api/presence" && request.method === "GET") {
+    return json(response, 200, await listPresenceForActor(request.auth));
+  }
+  if (url.pathname === "/api/presence/debug" && request.method === "GET") {
+    return json(response, 200, presenceDiagnosticsForActor(request.auth));
   }
   if (url.pathname === "/api/admin/persistent-sessions" && request.method === "GET") {
     if (!requireRole(request, response, ["Administrador"])) return;
@@ -2496,6 +2507,13 @@ const server = createServer(async (request, response) => {
 
 server.on("upgrade", (request, socket, head) => {
   const url = new URL(request.url, `http://${request.headers.host || "kalion.invalid"}`);
+  if (url.pathname === "/api/presence") {
+    handlePresenceUpgrade(request, socket, head).catch(() => {
+      socket.write("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+    });
+    return;
+  }
   if (url.pathname.startsWith("/api/meetings/") && url.pathname.endsWith("/signaling")) {
     handleMeetingUpgrade(request, socket, head).catch(() => {
       socket.write("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
