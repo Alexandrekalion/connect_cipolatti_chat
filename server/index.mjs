@@ -814,7 +814,9 @@ function canPromoteGroupParticipant(actor, conversation, participantId) {
 }
 
 function canDemoteGroupAdmin(actor, conversation, participantId) {
-  return groupRole(conversation, actor.id) === "owner" && groupRole(conversation, participantId) === "admin";
+  const actorRole = groupRole(conversation, actor.id);
+  const targetRole = groupRole(conversation, participantId);
+  return ["owner", "admin"].includes(actorRole) && targetRole === "admin" && participantId !== actor.id;
 }
 
 function internalReplyPreview(conversation, messageId) {
@@ -2071,7 +2073,7 @@ async function handleApi(request, response, url) {
               conversation.events.push(internalEvent("admin_promoted", request.auth, `${participant.name} foi promovido a administrador.`, { targetUserId: participant.id, groupId: conversation.id }));
             } else if (action === "demote") {
               if (!conversation.participantIds.includes(participant.id)) throw notFoundError("Participante n?o est? no grupo.");
-              if (!canDemoteGroupAdmin(request.auth, conversation, participant.id)) throw permissionError("Somente o propriet?rio pode remover administradores.");
+              if (!canDemoteGroupAdmin(request.auth, conversation, participant.id)) throw permissionError("Você não tem permissão para remover este administrador.");
               conversation.adminIds = (conversation.adminIds || []).filter((id) => id !== participant.id);
               conversation.messages.push({ id: createId("internal-msg"), type: "system", senderId: null, sender: "Sistema", text: `${participant.name} deixou de ser administrador por ${request.auth.name}.`, createdAt: new Date().toISOString(), status: "system" });
               conversation.events.push(internalEvent("admin_demoted", request.auth, `${participant.name} deixou de ser administrador.`, { targetUserId: participant.id, groupId: conversation.id }));

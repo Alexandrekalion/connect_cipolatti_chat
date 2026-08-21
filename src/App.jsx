@@ -17,7 +17,7 @@ import { activity, chartData, contacts, departments, users } from "./data";
 const BRAND_NAME = "CIPOLATTI";
 const BRAND_SUBTITLE = "Central de Atendimento Corporativo";
 const BRAND_ICON = `${import.meta.env.BASE_URL}cipolatti-icon.png`;
-const FRONTEND_BUILD_VERSION = "2026.08.21.8";
+const FRONTEND_BUILD_VERSION = "2026.08.21.9";
 const DEFAULT_API_TIMEOUT_MS = 15000;
 const LOGIN_API_TIMEOUT_MS = 15000;
 const appLifecycle = { hiddenAt: 0, resumedAt: Date.now() };
@@ -2726,7 +2726,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
     }
     const actionLabels = {
       promote: "Participante promovido a administrador.",
-      demote: "Administrador removido.",
+      demote: "Administrador removido da função.",
       remove: "Participante removido do grupo.",
     };
     try {
@@ -3320,8 +3320,8 @@ function ParticipantsModal({ conversation, directory = [], currentUser, onAction
   const actionsFor = (user) => {
     const role = roleFor(user);
     if (!canManage || user.id === currentUser?.id || role === "owner") return [];
-    if (viewerRole === "owner") return [role === "admin" ? ["demote", "Remover administrador"] : ["promote", "Tornar administrador"], ["remove", "Remover do grupo"]];
-    if (viewerRole === "admin" && role === "participant") return [["remove", "Remover do grupo"]];
+    if (role === "participant") return [["promote", "Tornar administrador"], ["remove", "Remover do grupo"]];
+    if (role === "admin") return [["demote", "Remover como administrador"]];
     return [];
   };
   const runAction = (user, action) => {
