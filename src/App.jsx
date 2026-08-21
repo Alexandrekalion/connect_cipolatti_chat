@@ -17,7 +17,7 @@ import { activity, chartData, contacts, departments, users } from "./data";
 const BRAND_NAME = "CIPOLATTI";
 const BRAND_SUBTITLE = "Central de Atendimento Corporativo";
 const BRAND_ICON = `${import.meta.env.BASE_URL}cipolatti-icon.png`;
-const FRONTEND_BUILD_VERSION = "2026.08.21.5";
+const FRONTEND_BUILD_VERSION = "2026.08.21.6";
 const DEFAULT_API_TIMEOUT_MS = 15000;
 const LOGIN_API_TIMEOUT_MS = 15000;
 const appLifecycle = { hiddenAt: 0, resumedAt: Date.now() };
@@ -396,14 +396,23 @@ async function webPushDiagnostics() {
   const permission = typeof Notification !== "undefined" ? Notification.permission : "unsupported";
   let registration = null;
   let subscription = null;
+  let scriptVersion = "";
   if (supported) {
     registration = await navigator.serviceWorker.ready.catch(() => null);
     subscription = registration ? await registration.pushManager.getSubscription().catch(() => null) : null;
+    scriptVersion = await fetch(`${import.meta.env.BASE_URL}notification-sw.js?diag=${Date.now()}`, { cache: "no-store" })
+      .then((response) => response.text())
+      .then((text) => text.match(/CIPOLATTI_CHAT_SW_VERSION\s*=\s*"([^"]+)"/)?.[1] || "")
+      .catch(() => "");
   }
   return {
     supported,
     permission,
     serviceWorker: Boolean(registration?.active),
+    serviceWorkerVersion: scriptVersion,
+    serviceWorkerState: registration?.active?.state || registration?.waiting?.state || registration?.installing?.state || "",
+    serviceWorkerScope: registration?.scope || "",
+    updateAvailable: Boolean(registration?.waiting),
     controlled: Boolean(navigator.serviceWorker?.controller),
     subscription: Boolean(subscription),
     endpoint: subscription?.endpoint || "",
@@ -422,14 +431,19 @@ async function sendWebPushTestNotification() {
   return apiRequest("/api/push/test", { method: "POST", body: JSON.stringify({ endpoint }) });
 }
 
-function monitorServiceWorkerUpdates({ onUpdateReady } = {}) {
+function monitorServiceWorkerUpdates({ onUpdateReady, canAutoApply } = {}) {
   if (!("serviceWorker" in navigator) || !window.isSecureContext) return () => {};
   let registrationRef = null;
   let disposed = false;
   let refreshing = false;
   const swUrl = `${import.meta.env.BASE_URL}notification-sw.js`;
   const notifyWaiting = (registration) => {
-    if (registration?.waiting && navigator.serviceWorker.controller) onUpdateReady?.(registration);
+    if (!registration?.waiting || !navigator.serviceWorker.controller) return;
+    if (canAutoApply?.()) {
+      registration.waiting.postMessage({ type: "CIPOLATTI_SKIP_WAITING" });
+      return;
+    }
+    onUpdateReady?.(registration);
   };
   const watchInstalling = (registration) => {
     const worker = registration.installing;
@@ -441,11 +455,12 @@ function monitorServiceWorkerUpdates({ onUpdateReady } = {}) {
   navigator.serviceWorker.register(swUrl).then((registration) => {
     if (disposed) return;
     registrationRef = registration;
+    console.info("CIPOLATTI service worker scope:", registration.scope);
     notifyWaiting(registration);
     registration.addEventListener("updatefound", () => watchInstalling(registration));
     registration.update().catch(() => {});
   }).catch(() => {});
-  const requestUpdate = () => registrationRef?.update?.().catch(() => {});
+  const requestUpdate = () => registrationRef?.update?.().then(() => notifyWaiting(registrationRef)).catch(() => {});
   const onVisible = () => {
     if (document.visibilityState === "visible") requestUpdate();
   };
@@ -1536,6 +1551,20 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   const sendingMessageRef = useRef(false);
   const pendingMessageKeysRef = useRef(new Set());
   const pendingUploadKeysRef = useRef(new Set());
+  useEffect(() => {
+    window.__cipolattiHasPendingChatWork = () => Boolean(
+      String(text || "").trim()
+      || String(attachmentMessage || "").trim()
+      || fileDrafts.length
+      || messageSending
+      || fileSending
+      || audioDraft
+      || recordingAudio
+    );
+    return () => {
+      if (window.__cipolattiHasPendingChatWork) delete window.__cipolattiHasPendingChatWork;
+    };
+  }, [text, attachmentMessage, fileDrafts.length, messageSending, fileSending, audioDraft, recordingAudio]);
   const fileInputRef = useRef(null);
   const conversationSearchRef = useRef(null);
   const emojiPickerRef = useRef(null);
@@ -4409,7 +4438,7 @@ function PersistentSessionsPanel() {
   return <article className="panel profile-modern-card persistent-sessions-panel"><div className="settings-heading"><span className="large-setting-icon"><ShieldCheck/></span><div><h2>Sessões persistentes</h2><p>Tokens de manter conectado, sem exibir hashes ou cookies.</p></div></div><div className="filter-bar embedded-filter"><label><Search size={16}/><input value={query} onChange={(event)=>setQuery(event.target.value)} placeholder="Filtrar por usuário, dispositivo, IP..."/></label><select value={status} onChange={(event)=>setStatus(event.target.value)}><option>Todos</option><option>Ativa</option><option>Revogada</option><option>Expirada</option></select><button className="secondary-button" onClick={load}><RefreshCw size={15}/> Atualizar</button><button className="danger-button" onClick={revokeAll}>Forçar novo login de todos</button></div><div className="table-scroll"><table className="persistent-session-table"><thead><tr><th>Usuário</th><th>Dispositivo</th><th>IP</th><th>Criada</th><th>Último uso</th><th>Expira</th><th>Status</th><th>Ações</th></tr></thead><tbody>{filtered.map((row)=><tr key={row.id}><td><strong>{row.name}</strong><small>{row.username} · {row.authProvider}</small></td><td><strong>{row.browser}</strong><small>{row.os} · {row.deviceId}</small></td><td><strong>{row.ip||"-"}</strong><small>Último: {row.lastIp||"-"}</small></td><td>{formatDateTime(row.createdAt)}</td><td>{formatDateTime(row.lastUsedAt)}</td><td>{formatDateTime(row.expiresAt)}</td><td><Status>{row.status}</Status>{row.revokedReason&&<small>{row.revokedReason}</small>}</td><td><div className="row-actions"><button className="secondary-button compact-action" disabled={row.status!=="Ativa"} onClick={()=>revoke(row)}>Encerrar</button><button className="secondary-button compact-action" onClick={()=>revokeUser(row)}>Usuário</button></div></td></tr>)}</tbody></table></div>{!filtered.length&&<div className="empty-result">Nenhuma sessão persistente encontrada.</div>}{toast&&<Toast message={toast} tone={toast.includes("erro")? "warning":"success"} onClose={()=>setToast("")}/>}</article>;
 }
 
-function ProfileSettingsPage({ currentUser, theme, onThemeChange, onCurrentUserUpdated, onLogout }) {
+function ProfileSettingsPage({ currentUser, theme, onThemeChange, onCurrentUserUpdated, onLogout, onOpenAgenda }) {
   const [form, setForm] = useState({
     displayName: currentUser.displayName || currentUser.name || "",
     phone: currentUser.phone || "",
@@ -4612,7 +4641,7 @@ function ProfileSettingsPage({ currentUser, theme, onThemeChange, onCurrentUserU
   return <div className="content-page profile-settings-page">
     <section className="panel profile-hero-card">
       <div className="profile-hero-main"><Avatar initials={currentUser.initials} src={currentUser.photoUrl} alt={currentUser.name} size="lg"/><div><h2>{form.displayName || currentUser.name}</h2><p>{form.jobTitle || currentUser.role}</p><span>{currentUser.department || currentUser.dept} · {form.status}</span></div></div>
-      <div className="profile-hero-actions"><label className="secondary-button photo-upload-button"><Image size={16}/> Alterar foto<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event)=>{const file=event.target.files?.[0];event.target.value="";uploadProfilePhoto(file)}}/></label><button className="secondary-button" onClick={removeProfilePhoto}>Remover foto</button><button className="primary-button" disabled={saving} onClick={save}><Save size={16}/> {saving ? "Salvando..." : "Salvar alterações"}</button></div>
+      <div className="profile-hero-actions"><button className="secondary-button mobile-agenda-shortcut" type="button" onClick={onOpenAgenda}><CalendarDays size={16}/> Agenda</button><label className="secondary-button photo-upload-button"><Image size={16}/> Alterar foto<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event)=>{const file=event.target.files?.[0];event.target.value="";uploadProfilePhoto(file)}}/></label><button className="secondary-button" onClick={removeProfilePhoto}>Remover foto</button><button className="primary-button" disabled={saving} onClick={save}><Save size={16}/> {saving ? "Salvando..." : "Salvar alterações"}</button></div>
     </section>
     <section className="profile-modern-grid">
       <article className="panel profile-modern-card"><div className="settings-heading"><span className="large-setting-icon"><Users/></span><div><h2>Dados profissionais</h2><p>Informações exibidas no diretório corporativo.</p></div></div><div className="form-grid"><label><span>Nome de exibição</span><input value={form.displayName} onChange={(event)=>setForm({...form,displayName:event.target.value})}/></label><label><span>Cargo</span><input value={form.jobTitle} onChange={(event)=>setForm({...form,jobTitle:event.target.value})}/></label><label><span>Departamento</span><input value={currentUser.department || currentUser.dept || ""} disabled /></label><label><span>Status</span><select value={form.status} onChange={(event)=>setForm({...form,status:event.target.value})}><option>Online</option><option>Ocupado</option><option>Ausente</option><option>Offline</option></select></label><label className="full"><span>Assinatura</span><textarea value={form.signature} onChange={(event)=>setForm({...form,signature:event.target.value})}/></label></div></article>
@@ -4620,7 +4649,7 @@ function ProfileSettingsPage({ currentUser, theme, onThemeChange, onCurrentUserU
       <article className="panel profile-modern-card"><div className="settings-heading"><span className="large-setting-icon"><Bell/></span><div><h2>Preferências</h2><p>Tema, idioma e notificações.</p></div></div><div className="form-grid"><fieldset className="theme-choice"><legend>Tema</legend><label><input type="radio" name="profile-theme" value="light" checked={(form.preferences.theme || "light") === "light"} onChange={(event)=>changeTheme(event.target.value)}/> Claro</label><label><input type="radio" name="profile-theme" value="dark" checked={form.preferences.theme === "dark"} onChange={(event)=>changeTheme(event.target.value)}/> Escuro</label></fieldset><label><span>Idioma</span><select value={form.preferences.language || "pt-BR"} onChange={(event)=>setForm({...form,preferences:{...form.preferences,language:event.target.value}})}><option value="pt-BR">Português</option></select></label><fieldset className="message-font-size-choice"><legend>Tamanho da fonte das mensagens</legend>{MESSAGE_FONT_SIZE_OPTIONS.map((option)=><label key={option.value}><input type="radio" name="message-font-size" value={option.value} checked={(form.preferences.messageFontSize || "default") === option.value} onChange={(event)=>savePreferencePatch({messageFontSize:event.target.value})}/><span>{option.label}</span><small>{option.size}</small></label>)}</fieldset><label className="check-row"><input type="checkbox" checked={form.preferences.notifications !== false} onChange={(event)=>savePreferencePatch({notifications:event.target.checked})}/> Receber notificações internas</label></div><div className="notification-preferences"><div className="notification-permission"><div><strong>Notificações do navegador</strong><span>{notificationStatus}</span><small>{pushStatusLabel}</small></div><button className="secondary-button" type="button" onClick={requestNotifications} disabled={pushStatus === "subscribed"}><Bell size={15}/> {pushStatus === "subscribed" ? "Push ativado" : "Ativar notificações push"}</button><button className="secondary-button" type="button" onClick={testPushNotification} disabled={testingPush}><Bell size={15}/> {testingPush ? "Testando..." : "Testar notificação"}</button></div><div className="push-diagnostic-grid"><span><strong>Push</strong><small>{pushStatus === "subscribed" ? "Ativo" : "Inativo"}</small></span><span><strong>Permissão</strong><small>{pushPermissionLabel}</small></span><span><strong>Subscription</strong><small>{pushDiagnostic?.subscription ? "Registrada" : "Não registrada"}</small></span><span><strong>Service Worker</strong><small>{pushDiagnostic?.serviceWorker ? "Ativo" : "Inativo"}</small></span></div><small className="push-diagnostic-note">{pushDiagnostic?.displayMode || "Verificando dispositivo"} · No Android, som e tela bloqueada dependem da permissão e do canal de notificações do PWA no sistema.</small><Toggle label="Mostrar conteúdo da mensagem" description="Exibe remetente e prévia quando o navegador mostrar o aviso." checked={form.preferences.showNotificationContent !== false} onChange={(value)=>savePreferencePatch({showNotificationContent:value})}/><Toggle label="Som de nova mensagem" description="Toca um alerta discreto em intervalos controlados." checked={form.preferences.notificationSound === true} onChange={(value)=>savePreferencePatch({notificationSound:value})}/><Toggle label="Piscar/contador da janela" description="Mantém contador no título enquanto houver mensagens pendentes." checked={form.preferences.flashWindowTitle !== false} onChange={(value)=>savePreferencePatch({flashWindowTitle:value})}/><Toggle label="Notificações do Windows" description="Usa avisos nativos do navegador quando permitido." checked={form.preferences.browserNotifications !== false} onChange={(value)=>savePreferencePatch({browserNotifications:value})}/><Toggle label="Repetir alerta até leitura" description="Repete o banner e o aviso a cada 60 segundos enquanto a conversa não for aberta." checked={form.preferences.repeatAlertsUntilRead !== false} onChange={(value)=>savePreferencePatch({repeatAlertsUntilRead:value})}/><Toggle label="Não perturbe" description="Silencia banners, sons e avisos persistentes temporariamente." checked={form.preferences.doNotDisturb === true} onChange={(value)=>savePreferencePatch({doNotDisturb:value})}/><div className="quiet-hours-fields"><label><span>Horário silencioso início</span><input type="time" value={form.preferences.quietHoursStart || ""} onChange={(event)=>savePreferencePatch({quietHoursStart:event.target.value})}/></label><label><span>Horário silencioso fim</span><input type="time" value={form.preferences.quietHoursEnd || ""} onChange={(event)=>savePreferencePatch({quietHoursEnd:event.target.value})}/></label></div><Toggle label="Notificar mensagens individuais" description="Avisar novas conversas diretas quando esta aba estiver em segundo plano." checked={form.preferences.notifyDirectMessages !== false} onChange={(value)=>savePreferencePatch({notifyDirectMessages:value})}/><Toggle label="Notificar grupos" description="Avisar novas mensagens de grupos dos quais você participa." checked={form.preferences.notifyGroups !== false} onChange={(value)=>savePreferencePatch({notifyGroups:value})}/></div></article>
       <article className="panel profile-modern-card out-of-office-card"><div className="settings-heading"><span className="large-setting-icon"><Clock3/></span><div><h2>Fora da empresa</h2><p>Resposta automática para conversas privadas durante ausências programadas.</p></div></div><div className="out-of-office-status"><Status>{outOfOffice.label || "Desativado"}</Status></div><div className="form-grid"><label className="check-row full"><input type="checkbox" checked={outOfOffice.enabled} onChange={(event)=>setOutOfOffice({...outOfOffice,enabled:event.target.checked})}/> Ativar “Fora da empresa”</label><label><span>Data e hora de início</span><input type="datetime-local" value={outOfOffice.startAt} onChange={(event)=>setOutOfOffice({...outOfOffice,startAt:event.target.value})}/></label><label><span>Data e hora de retorno</span><input type="datetime-local" value={outOfOffice.endAt} onChange={(event)=>setOutOfOffice({...outOfOffice,endAt:event.target.value})}/></label><label className="full"><span>Mensagem automática</span><textarea maxLength={1000} value={outOfOffice.message} onChange={(event)=>setOutOfOffice({...outOfOffice,message:event.target.value})} placeholder="Olá! Estou fora da empresa e retornarei em breve. Em caso de urgência, entre em contato com meu departamento."/></label></div><div className="out-of-office-actions"><small>{outOfOffice.message.length}/1000 caracteres · respostas automáticas são enviadas uma vez por conversa a cada 24 horas.</small><div><button type="button" className="secondary-button" disabled={savingOutOfOffice} onClick={disableOutOfOffice}>Desativar agora</button><button type="button" className="primary-button" disabled={savingOutOfOffice} onClick={saveOutOfOffice}><Save size={16}/> {savingOutOfOffice ? "Salvando..." : "Salvar"}</button></div></div></article>
       <article className="panel profile-modern-card"><div className="settings-heading"><span className="large-setting-icon"><ShieldCheck/></span><div><h2>Segurança</h2><p>Acesso local e Active Directory.</p></div></div><div className="security-banner profile-security-banner"><ShieldCheck/><div><strong>Manter conectado</strong><span>Sessões persistentes usam token seguro, validação no AD e rotação automática.</span></div></div><div className="security-banner profile-security-banner muted"><KeyRound/><div><strong>Active Directory</strong><span>A senha é gerenciada pelo AD e nunca fica armazenada no CIPOLATTI CHAT.</span></div></div><button className="danger-button full-width-security-action" onClick={logoutEverywhere}>Sair de todos os dispositivos</button></article>
-      <article className="panel profile-modern-card about-build-card"><div className="settings-heading"><span className="large-setting-icon"><MonitorUp/></span><div><h2>Sobre</h2><p>Versão instalada neste dispositivo.</p></div></div><div className="about-build-info"><span>Frontend</span><strong>{FRONTEND_BUILD_VERSION}</strong><small>Service worker: atualização controlada com aviso no aplicativo.</small></div></article>
+      <article className="panel profile-modern-card about-build-card"><div className="settings-heading"><span className="large-setting-icon"><MonitorUp/></span><div><h2>Sobre</h2><p>Versão instalada neste dispositivo.</p></div></div><div className="about-build-info"><span>Frontend</span><strong>{FRONTEND_BUILD_VERSION}</strong><small>Service worker: {pushDiagnostic?.serviceWorkerVersion || "verificando"} · {pushDiagnostic?.serviceWorkerState || "sem estado"} · {pushDiagnostic?.controlled ? "controlando a página" : "sem controle ativo"}</small><small>Scope: {pushDiagnostic?.serviceWorkerScope || "-"}</small><small>Atualização pendente: {pushDiagnostic?.updateAvailable ? "sim" : "não"}</small></div></article>
       {currentUser.role==="Administrador"&&<PersistentSessionsPanel/>}
     </section>
     {toast && <Toast message={toast} tone={toast.includes("erro") ? "warning" : "success"} onClose={()=>setToast("")}/>}
@@ -4713,8 +4742,8 @@ function PushActivationModal({ currentUser, mode = "invite", onClose, onCurrentU
   );
 }
 
-function SettingsPage({ integration = false, currentUser, theme, onThemeChange, onCurrentUserUpdated, onLogout }) {
-  return <ProfileSettingsPage currentUser={currentUser} theme={theme} onThemeChange={onThemeChange} onCurrentUserUpdated={onCurrentUserUpdated} onLogout={onLogout}/>;
+function SettingsPage({ integration = false, currentUser, theme, onThemeChange, onCurrentUserUpdated, onLogout, setPage }) {
+  return <ProfileSettingsPage currentUser={currentUser} theme={theme} onThemeChange={onThemeChange} onCurrentUserUpdated={onCurrentUserUpdated} onLogout={onLogout} onOpenAgenda={() => setPage?.("agenda")}/>;
   if (integration) return <WhatsAppIntegrationPage currentUser={currentUser}/>;
   const [saved, setSaved] = useState(false);
   const [form,setForm]=useState({companyName:"",companyLogoUrl:"",companyDescription:"",officialWhatsappNumber:"",timezone:"America/Sao_Paulo",language:"pt-BR",dateFormat:"DD/MM/YYYY",agentIdentification:"{atendente} - Departamento {departamento}:",automaticRefresh:true,auditEnabled:true,preserveTransferHistory:true});
@@ -5454,13 +5483,23 @@ function App() {
     console.info(`CIPOLATTI frontend build: ${FRONTEND_BUILD_VERSION}`);
   }, []);
   useEffect(() => {
-    return monitorServiceWorkerUpdates({ onUpdateReady: setServiceWorkerUpdate });
+    return monitorServiceWorkerUpdates({
+      onUpdateReady: setServiceWorkerUpdate,
+      canAutoApply: () => !window.__cipolattiHasPendingChatWork?.(),
+    });
   }, []);
   const applyServiceWorkerUpdate = () => {
     const worker = serviceWorkerUpdate?.waiting;
     if (!worker) return setServiceWorkerUpdate(null);
     worker.postMessage({ type: "CIPOLATTI_SKIP_WAITING" });
   };
+  useEffect(() => {
+    if (!serviceWorkerUpdate) return undefined;
+    const timer = window.setInterval(() => {
+      if (!window.__cipolattiHasPendingChatWork?.()) applyServiceWorkerUpdate();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [serviceWorkerUpdate]);
   const openConversationFromPush = (detail = {}) => {
     const conversationId = detail.conversationId || "";
     if (!conversationId) return;
@@ -5591,7 +5630,7 @@ function App() {
     if (page === "agenda") return <MeetingsPage currentUser={currentUser}/>;
     if (page === "departamentos") return <DepartmentsPage setPage={setPage} currentUser={currentUser}/>;
     if (page === "usuarios") return <CollaboratorsPage setPage={setPage} currentUser={currentUser} onCurrentUserUpdated={authenticate}/>;
-    if (page === "configuracoes") return <SettingsPage key="settings" currentUser={currentUser} theme={theme} onThemeChange={updateTheme} onCurrentUserUpdated={setCurrentUser} onLogout={logout} />;
+    if (page === "configuracoes") return <SettingsPage key="settings" currentUser={currentUser} theme={theme} onThemeChange={updateTheme} onCurrentUserUpdated={setCurrentUser} onLogout={logout} setPage={setPage} />;
     return <GenericPage key={page} page={page} />;
   }, [page, currentUser, theme]);
 
