@@ -1401,6 +1401,7 @@ body,
 
 .participant-modal-row {
   position: relative;
+  flex: 0 0 auto;
   min-height: 64px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 132px;
@@ -2652,7 +2653,7 @@ body.attachment-modal-open .modal-backdrop {
 .shared-media-tabs button { height: 30px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--muted); padding: 0 10px; cursor: pointer; white-space: nowrap; }
 .shared-media-tabs button.active { background: var(--soft); color: var(--text-strong); border-color: rgba(196,154,44,.55); }
 .shared-media-list { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; overflow-x: hidden; padding-right: 6px; scrollbar-gutter: stable; }
-.shared-media-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 70px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.025); }
+.shared-media-item { flex: 0 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 70px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.025); }
 .shared-media-card-main { min-width: 0; display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 12px; align-items: center; }
 .shared-media-preview { width: 56px; height: 50px; border-radius: 6px; background: var(--soft); display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .shared-media-preview img { width: 100%; height: 100%; object-fit: cover; }
