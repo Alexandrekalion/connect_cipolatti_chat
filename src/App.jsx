@@ -20,6 +20,7 @@ const BRAND_ICON = `${import.meta.env.BASE_URL}cipolatti-icon.png`;
 const FRONTEND_BUILD_VERSION = "2026.07.27.1";
 const DEFAULT_API_TIMEOUT_MS = 15000;
 const LOGIN_API_TIMEOUT_MS = 15000;
+const appLifecycle = { hiddenAt: 0, resumedAt: Date.now() };
 const MESSAGE_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "👏", "✅"];
 const EMOJI_CATEGORIES = [
   { id: "recent", label: "Recentes", icon: "🕘", keywords: "" },
@@ -41,6 +42,18 @@ const MESSAGE_FONT_SIZE_OPTIONS = [
   { value: "large", label: "Grande", size: "18 px" },
   { value: "xlarge", label: "Muito grande", size: "20 px" },
 ];
+
+if (typeof window !== "undefined" && !window.__cipolattiLifecycleListeners) {
+  window.__cipolattiLifecycleListeners = true;
+  const markResumed = () => { appLifecycle.resumedAt = Date.now(); };
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) appLifecycle.hiddenAt = Date.now();
+    else markResumed();
+  });
+  window.addEventListener("pageshow", markResumed);
+  window.addEventListener("focus", markResumed);
+  window.addEventListener("online", markResumed);
+}
 
 function normalizeSearchText(value = "") {
   return String(value || "")
@@ -246,11 +259,17 @@ function timeoutMessageFor(path, timeoutMs) {
   return `A requisicao ${path} nao respondeu em ${Math.round(timeoutMs / 1000)} segundos.`;
 }
 
+function isLikelySuspendedRequest(startedAt) {
+  return Boolean(document.hidden || appLifecycle.hiddenAt >= startedAt || Date.now() - appLifecycle.resumedAt < 5000);
+}
+
 async function apiRequest(path, options = {}) {
   const apiBase = String(import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
   const target = path.startsWith("/api/") ? (apiBase ? `${apiBase}${path.slice(4)}` : path) : path;
   const isFormData = options.body instanceof FormData;
   const timeoutMs = Number(options.timeoutMs || DEFAULT_API_TIMEOUT_MS);
+  const startedAt = Date.now();
+  const startedHidden = document.hidden;
   const controller = new AbortController();
   const externalSignal = options.signal;
   const abortFromExternal = () => controller.abort(externalSignal?.reason);
@@ -270,6 +289,12 @@ async function apiRequest(path, options = {}) {
     payload = await response.json().catch(() => ({}));
   } catch (error) {
     if (error?.name === "AbortError" || controller.signal.aborted) {
+      if (startedHidden || isLikelySuspendedRequest(startedAt)) {
+        const suspendedError = new Error("Requisição pausada enquanto o aplicativo estava em segundo plano.");
+        suspendedError.code = "APP_SUSPENDED";
+        suspendedError.path = path;
+        throw suspendedError;
+      }
       const timeoutError = new Error(timeoutMessageFor(path, timeoutMs));
       timeoutError.code = "API_TIMEOUT";
       timeoutError.path = path;
@@ -1382,6 +1407,15 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
     : conversations.filter((conversation) => isAdmin || conversation.department === currentUser.dept || conversation.owner === currentUser.name || conversation.participants?.includes(currentUser.name));
   const scopedConversations = groupOnly ? accessibleConversations.filter((conversation) => conversation.type === "group") : accessibleConversations;
   const current = scopedConversations.find((conversation) => conversation.id === selectedId) || null;
+  const currentGroupRole = current?.currentUserGroupRole || current?.memberRoles?.[currentUser?.id] || "participant";
+  const currentCanManageGroup = current?.type === "group" && ["owner", "admin"].includes(currentGroupRole);
+  const currentCanSendMessages = !internal || !current || current.ended || current.type !== "group" || current.messageSendMode !== "admins" || currentCanManageGroup;
+  const groupSendBlocked = Boolean(internal && current?.type === "group" && !current.ended && !currentCanSendMessages);
+  const canSendToConversation = (conversation) => {
+    if (!internal || !conversation || conversation.ended || conversation.type !== "group" || conversation.messageSendMode !== "admins") return true;
+    const role = conversation.currentUserGroupRole || conversation.memberRoles?.[currentUser?.id] || "participant";
+    return ["owner", "admin"].includes(role);
+  };
   const visibleMessages = useMemo(() => groupMessagesForDisplay(current?.messages || []), [current?.messages]);
   const searchResults = useMemo(() => {
     const query = normalizeSearchText(conversationSearch).trim();
@@ -1441,10 +1475,13 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
     };
     const connect = () => {
       if (closed) return;
+      window.clearTimeout(reconnectTimer);
+      window.clearInterval(heartbeatTimer);
       socket = new WebSocket(websocketApiUrl("/api/presence"));
       socket.onopen = () => {
         markSelfOnline();
         sendPresence("presence:activity");
+        window.clearInterval(heartbeatTimer);
         heartbeatTimer = window.setInterval(() => sendPresence("presence:heartbeat"), 30_000);
       };
       socket.onmessage = (event) => {
@@ -1459,12 +1496,26 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
       };
       socket.onerror = () => socket?.close();
     };
+    const ensurePresenceConnected = () => {
+      if (document.hidden) return;
+      if (socket?.readyState === WebSocket.OPEN) {
+        markSelfOnline();
+        sendPresence("presence:activity");
+        apiRequest("/api/presence").then(mergePresenceRows).catch(() => {});
+        return;
+      }
+      window.clearTimeout(reconnectTimer);
+      connect();
+    };
     apiRequest("/api/presence").then(mergePresenceRows).catch(() => {});
     const pollTimer = window.setInterval(() => apiRequest("/api/presence").then(mergePresenceRows).catch(() => {}), 30_000);
     connect();
     const activityEvents = ["pointerdown", "keydown", "touchstart", "focus"];
     activityEvents.forEach((eventName) => window.addEventListener(eventName, sendActivity, { passive: true }));
     document.addEventListener("visibilitychange", sendActivity);
+    document.addEventListener("visibilitychange", ensurePresenceConnected);
+    window.addEventListener("pageshow", ensurePresenceConnected);
+    window.addEventListener("online", ensurePresenceConnected);
     return () => {
       closed = true;
       window.clearTimeout(reconnectTimer);
@@ -1472,6 +1523,9 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
       window.clearInterval(pollTimer);
       activityEvents.forEach((eventName) => window.removeEventListener(eventName, sendActivity));
       document.removeEventListener("visibilitychange", sendActivity);
+      document.removeEventListener("visibilitychange", ensurePresenceConnected);
+      window.removeEventListener("pageshow", ensurePresenceConnected);
+      window.removeEventListener("online", ensurePresenceConnected);
       socket?.close();
     };
   }, [currentUser?.id, internal]);
@@ -1629,7 +1683,20 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   useEffect(() => {
     if (!internal) return undefined;
     let active = true;
+    let refreshTimer = 0;
+    let refreshInFlight = false;
+    const scheduleRefresh = (delay = 3000) => {
+      window.clearTimeout(refreshTimer);
+      if (!active) return;
+      refreshTimer = window.setTimeout(refresh, delay);
+    };
     const refresh = async () => {
+      if (!active || refreshInFlight) return;
+      if (document.hidden) {
+        scheduleRefresh(3000);
+        return;
+      }
+      refreshInFlight = true;
       try {
         const conversationRows = await apiRequest("/api/internal/conversations");
         if (!active) return;
@@ -1649,12 +1716,31 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
             setToast(`Lista de usuários indisponível: ${error.message}`);
           });
       } catch (error) {
+        if (error?.code === "APP_SUSPENDED") return;
         if (active) setToast(error.message);
+      } finally {
+        refreshInFlight = false;
+        scheduleRefresh(3000);
       }
     };
+    const resumeRefresh = () => {
+      if (document.hidden) return;
+      window.clearTimeout(refreshTimer);
+      refresh();
+    };
     refresh();
-    const timer = window.setInterval(refresh, 3000);
-    return () => { active = false; window.clearInterval(timer); };
+    document.addEventListener("visibilitychange", resumeRefresh);
+    window.addEventListener("pageshow", resumeRefresh);
+    window.addEventListener("focus", resumeRefresh);
+    window.addEventListener("online", resumeRefresh);
+    return () => {
+      active = false;
+      window.clearTimeout(refreshTimer);
+      document.removeEventListener("visibilitychange", resumeRefresh);
+      window.removeEventListener("pageshow", resumeRefresh);
+      window.removeEventListener("focus", resumeRefresh);
+      window.removeEventListener("online", resumeRefresh);
+    };
   }, [internal, groupOnly, currentUser.id]);
 
   useEffect(() => {
@@ -1894,6 +1980,10 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
       await saveEditedMessage();
       return;
     }
+    if (!currentCanSendMessages) {
+      setToast("Somente administradores podem enviar mensagens neste momento.");
+      return;
+    }
     if (fileDraft?.file) {
       sendFileDraft();
       return;
@@ -1975,6 +2065,10 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   };
   const startAudioRecording = async () => {
     if (!internal || current.ended) return;
+    if (!currentCanSendMessages) {
+      setToast("Somente administradores podem enviar mensagens neste momento.");
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
       setToast("Gravação de áudio não é suportada neste navegador.");
       return;
@@ -2012,6 +2106,10 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   };
   const sendAudioDraft = async () => {
     if (!audioDraft || !current?.id) return;
+    if (!currentCanSendMessages) {
+      setToast("Somente administradores podem enviar mensagens neste momento.");
+      return;
+    }
     try {
       const body = new FormData();
       body.append("file", audioDraft.blob, `audio-${Date.now()}.webm`);
@@ -2089,6 +2187,10 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
       setToast("Conversa encerrada. Inicie uma nova conversa para enviar anexos.");
       return;
     }
+    if (!currentCanSendMessages) {
+      setToast("Somente administradores podem enviar mensagens neste momento.");
+      return;
+    }
     const blockedExtensions = blockedAttachmentExtensionsFromFiles(incoming);
     if (blockedExtensions.length) {
       const allowedFiles = incoming.filter((file) => !isBlockedAttachmentFile(file));
@@ -2158,7 +2260,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
     return files.find((file) => clipboardImageTypes.has(String(file.type || "").toLowerCase())) || null;
   };
   const handlePaste = (event) => {
-    if (!internal || current.ended) return;
+    if (!internal || current.ended || !currentCanSendMessages) return;
     const file = clipboardImageFile(event.clipboardData);
     if (!file) return;
     event.preventDefault();
@@ -2166,7 +2268,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
     createFileDraft(file, "clipboard");
   };
   const handleDragOver = (event) => {
-    if (!internal || current.ended || fileSending) return;
+    if (!internal || current.ended || fileSending || !currentCanSendMessages) return;
     if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
@@ -2176,7 +2278,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
     if (!event.currentTarget.contains(event.relatedTarget)) setDragActive(false);
   };
   const handleDrop = (event) => {
-    if (!internal || current.ended || fileSending) return;
+    if (!internal || current.ended || fileSending || !currentCanSendMessages) return;
     const files = Array.from(event.dataTransfer?.files || []);
     if (!files.length) return;
     event.preventDefault();
@@ -2278,6 +2380,10 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   };
   const sendFileDraft = async () => {
     if (!fileDrafts.length || !current?.id || fileSending) return;
+    if (!currentCanSendMessages) {
+      setToast("Somente administradores podem enviar mensagens neste momento.");
+      return;
+    }
     const conversationSnapshot = current;
     const replySnapshot = replyTo;
     const failed = [];
@@ -2368,6 +2474,10 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   const retryAttachmentUpload = async (message) => {
     const retry = message.retryDraft;
     if (!retry?.file || !current?.id) return;
+    if (!currentCanSendMessages) {
+      setToast("Somente administradores podem enviar mensagens neste momento.");
+      return;
+    }
     const clientMessageId = createClientMessageId();
     const optimisticId = message.id;
     updateOptimisticFileMessage(current.id, optimisticId, {
@@ -2437,6 +2547,21 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
       setToast(actionLabels[action] || "Participantes atualizados.");
     } catch (error) {
       setToast(error.message || "Não foi possível atualizar o participante.");
+    }
+  };
+  const changeGroupSendPolicy = async (messageSendMode) => {
+    if (!internal || !current?.id || current.type !== "group") return;
+    try {
+      const updated = await apiRequest(`/api/internal/conversations/${current.id}/send-policy`, {
+        method: "POST",
+        body: JSON.stringify({ messageSendMode }),
+      });
+      setConversations((items) => items.map((item) => item.id === current.id ? mapInternalConversation(updated, currentUser) : item));
+      setModal("");
+      setMoreMenuOpen(false);
+      setToast(messageSendMode === "admins" ? "Somente administradores podem enviar mensagens." : "Todos os participantes podem enviar mensagens.");
+    } catch (error) {
+      setToast(error.message || "Não foi possível alterar quem envia mensagens.");
     }
   };
 
@@ -2539,6 +2664,11 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   };
   const forwardMessage = async ({ destinationIds, comment }) => {
     if (!forwarding) return;
+    const blockedDestination = scopedConversations.find((conversation) => destinationIds.includes(conversation.id) && !canSendToConversation(conversation));
+    if (blockedDestination) {
+      setToast(`Somente administradores podem encaminhar mensagens para ${blockedDestination.name}.`);
+      return;
+    }
     try {
       await apiRequest(`/api/internal/conversations/${current.id}/forward`, {
         method: "POST",
@@ -2603,6 +2733,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
   const handleMoreAction = (action) => {
     setMoreMenuOpen(false);
     if (action === "participants") return setModal("participants");
+    if (action === "message-policy") return setModal("message-policy");
     if (action === "shared-media") return setModal("shared-media");
     if (action === "mute") return setToast("Silenciar notificações será disponibilizado em uma próxima etapa.");
     if (action === "export") return setToast("Exportar conversa será disponibilizado em uma próxima etapa.");
@@ -2767,8 +2898,8 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
           <div className="chat-actions">
             {!internal && <button className="secondary-button" onClick={() => setModal("transfer")}><ArrowLeftRight size={17} /> Transferir</button>}
             {internal && <button className="secondary-button" onClick={() => setModal("shared-media")}><Paperclip size={17} /> Midias</button>}
-            {internal && current.type === "group" && ["owner","admin"].includes(current.currentUserGroupRole) && <button className="secondary-button" onClick={() => setModal("participant")}><UserPlus size={17} /> Adicionar pessoa</button>}
-            {internal && current.type === "group" && <div className="chat-more"><button className="icon-button" aria-label="Mais opções" onClick={() => setMoreMenuOpen((value) => !value)}><MoreHorizontal size={19}/></button>{moreMenuOpen && <div className="chat-more-menu"><button onClick={() => handleMoreAction("edit")}>Editar grupo</button><button onClick={() => handleMoreAction("image")}>Alterar imagem</button><button onClick={() => handleMoreAction("participants")}>Ver participantes</button><button onClick={() => handleMoreAction("shared-media")}>Midias compartilhadas</button><button onClick={() => handleMoreAction("mute")}>Silenciar notificações</button><button onClick={() => handleMoreAction("export")}>Exportar conversa (futuro)</button><button className="danger-option" disabled={current.ended} onClick={() => handleMoreAction("end")}>Encerrar grupo</button><button onClick={() => handleMoreAction("leave")}>Sair do grupo</button></div>}</div>}
+            {internal && current.type === "group" && currentCanManageGroup && <button className="secondary-button" onClick={() => setModal("participant")}><UserPlus size={17} /> Adicionar pessoa</button>}
+            {internal && current.type === "group" && <div className="chat-more"><button className="icon-button" aria-label="Mais opções" onClick={() => setMoreMenuOpen((value) => !value)}><MoreHorizontal size={19}/></button>{moreMenuOpen && <div className="chat-more-menu"><button onClick={() => handleMoreAction("edit")}>Editar grupo</button><button onClick={() => handleMoreAction("image")}>Alterar imagem</button><button onClick={() => handleMoreAction("participants")}>Ver participantes</button>{currentCanManageGroup && <button onClick={() => handleMoreAction("message-policy")}>Permitir mensagens</button>}<button onClick={() => handleMoreAction("shared-media")}>Midias compartilhadas</button><button onClick={() => handleMoreAction("mute")}>Silenciar notificações</button><button onClick={() => handleMoreAction("export")}>Exportar conversa (futuro)</button><button className="danger-option" disabled={current.ended} onClick={() => handleMoreAction("end")}>Encerrar grupo</button><button onClick={() => handleMoreAction("leave")}>Sair do grupo</button></div>}</div>}
             {internal ? <button className="secondary-button" onClick={() => setConversationSearchOpen(true)}><Search size={17} /> Buscar na conversa</button> : <button className="danger-button" disabled={current.ended} onClick={() => setModal("end")}>{current.ended ? "Atendimento encerrado" : "Encerrar atendimento"}</button>}
           </div>
         </header>
@@ -2806,18 +2937,19 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
             </React.Fragment>;
           })}
         </div>
-        <div className="composer-wrap">
-          {showJumpLatest && <button type="button" className="jump-latest" onClick={() => scrollMessagesToBottom("smooth")}>↓ {pendingLatestCount > 0 ? `${pendingLatestCount} nova${pendingLatestCount === 1 ? "" : "s"} mensagem${pendingLatestCount === 1 ? "" : "s"}` : "Novas mensagens"}</button>}
-          {!internal && <div className="composer-tabs">{["Responder", "Observação interna"].map((item) => <button key={item} className={mode === item ? "active" : ""} onClick={() => setMode(item)}>{item}</button>)}</div>}
-          {replyTo && <div className="reply-preview" data-testid="reply-preview"><button type="button" onClick={() => jumpToMessage(replyTo.id)}><strong>Respondendo a {replyTo.sender || "mensagem"}</strong><span>{messageExcerpt(replyTo)}</span></button><button type="button" className="icon-button" onClick={clearReplyForCurrent} aria-label="Cancelar resposta"><X size={15}/></button></div>}
-          {editingMessage && <div className="edit-preview" data-testid="edit-preview"><div><strong>Editando mensagem</strong><span>Enter salva · Esc cancela</span></div><button type="button" className="icon-button" onClick={cancelEditingMessage} aria-label="Cancelar edição"><X size={15}/></button></div>}
-          <div className="composer">
+          <div className="composer-wrap">
+            {showJumpLatest && <button type="button" className="jump-latest" onClick={() => scrollMessagesToBottom("smooth")}>↓ {pendingLatestCount > 0 ? `${pendingLatestCount} nova${pendingLatestCount === 1 ? "" : "s"} mensagem${pendingLatestCount === 1 ? "" : "s"}` : "Novas mensagens"}</button>}
+            {!internal && <div className="composer-tabs">{["Responder", "Observação interna"].map((item) => <button key={item} className={mode === item ? "active" : ""} onClick={() => setMode(item)}>{item}</button>)}</div>}
+            {replyTo && <div className="reply-preview" data-testid="reply-preview"><button type="button" onClick={() => jumpToMessage(replyTo.id)}><strong>Respondendo a {replyTo.sender || "mensagem"}</strong><span>{messageExcerpt(replyTo)}</span></button><button type="button" className="icon-button" onClick={clearReplyForCurrent} aria-label="Cancelar resposta"><X size={15}/></button></div>}
+            {editingMessage && <div className="edit-preview" data-testid="edit-preview"><div><strong>Editando mensagem</strong><span>Enter salva · Esc cancela</span></div><button type="button" className="icon-button" onClick={cancelEditingMessage} aria-label="Cancelar edição"><X size={15}/></button></div>}
+          {groupSendBlocked && <div className="composer-blocked-notice">Somente administradores podem enviar mensagens neste momento.</div>}
+          <div className={`composer ${groupSendBlocked ? "composer-disabled" : ""}`}>
             {internal && <input ref={fileInputRef} type="file" multiple hidden onChange={selectFileDraft} />}
-            <textarea ref={composerTextRef} disabled={current.ended || Boolean(fileDraft)} value={text} onPaste={handlePaste} onChange={(event) => editingMessage ? setText(event.target.value) : updateComposerText(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && editingMessage) { event.preventDefault(); cancelEditingMessage(); } if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder={current.ended ? "Conversa encerrada. Inicie uma nova conversa." : editingMessage ? "Edite sua mensagem..." : fileDraft ? "Envie ou cancele os anexos selecionados." : "Digite sua mensagem..."} />
+            <textarea ref={composerTextRef} disabled={current.ended || groupSendBlocked || Boolean(fileDraft)} value={text} onPaste={handlePaste} onChange={(event) => editingMessage ? setText(event.target.value) : updateComposerText(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && editingMessage) { event.preventDefault(); cancelEditingMessage(); } if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder={current.ended ? "Conversa encerrada. Inicie uma nova conversa." : groupSendBlocked ? "Somente administradores podem enviar mensagens." : editingMessage ? "Edite sua mensagem..." : fileDraft ? "Envie ou cancele os anexos selecionados." : "Digite sua mensagem..."} />
             <div className="composer-tools">
-              <span className="composer-left-tools"><button title="Emoji" aria-label="Abrir emojis" disabled={current.ended || Boolean(fileDraft)} onClick={() => setEmojiOpen((value) => !value)}><Smile /></button><button title="Anexar" disabled={current.ended || !internal || Boolean(fileDraft)} onClick={() => fileInputRef.current?.click()}><Paperclip /></button>{internal&&<button className={recordingAudio ? "recording-tool" : ""} title={recordingAudio ? "Parar gravação" : "Gravar áudio"} disabled={current.ended || Boolean(audioDraft) || Boolean(fileDraft)} onClick={() => recordingAudio ? recorderRef.current?.stop() : startAudioRecording()}><Mic /></button>}</span>
+              <span className="composer-left-tools"><button title="Emoji" aria-label="Abrir emojis" disabled={current.ended || groupSendBlocked || Boolean(fileDraft)} onClick={() => setEmojiOpen((value) => !value)}><Smile /></button><button title="Anexar" disabled={current.ended || groupSendBlocked || !internal || Boolean(fileDraft)} onClick={() => fileInputRef.current?.click()}><Paperclip /></button>{internal&&<button className={recordingAudio ? "recording-tool" : ""} title={recordingAudio ? "Parar gravação" : "Gravar áudio"} disabled={current.ended || groupSendBlocked || Boolean(audioDraft) || Boolean(fileDraft)} onClick={() => recordingAudio ? recorderRef.current?.stop() : startAudioRecording()}><Mic /></button>}</span>
               {editingMessage && <button className="secondary-button compact-action" type="button" onClick={cancelEditingMessage}>Cancelar</button>}
-              <button className="send-button" disabled={current.ended || fileSending || (!text.trim() && !fileDraft?.file)} onClick={sendMessage} title={editingMessage ? "Salvar edição" : "Enviar"}>{editingMessage ? <Save /> : <Send />}</button>
+              <button className="send-button" disabled={current.ended || groupSendBlocked || fileSending || (!text.trim() && !fileDraft?.file)} onClick={sendMessage} title={editingMessage ? "Salvar edição" : "Enviar"}>{editingMessage ? <Save /> : <Send />}</button>
             </div>
             {emojiOpen && <EmojiPickerPanel pickerRef={emojiPickerRef} recentEmojis={recentEmojis} onSelect={insertEmoji} onClose={() => setEmojiOpen(false)} />}
           </div>
@@ -2835,10 +2967,11 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
       {modal === "transfer" && <TransferModal onClose={() => setModal("")} onConfirm={transfer} />}
       {modal === "participant" && <AddParticipantsModal conversation={current} directory={collaboratorsWithPresence} onClose={() => setModal("")} onConfirm={addParticipant} />}
       {modal === "participants" && <ParticipantsModal conversation={current} directory={collaboratorsWithPresence} currentUser={currentUser} onAction={changeParticipantRole} onClose={() => setModal("")} />}
+      {modal === "message-policy" && <Modal title="Permitir mensagens" onClose={() => setModal("")} footer={<><button className="secondary-button" onClick={() => setModal("")}>Cancelar</button><button className="primary-button" onClick={() => changeGroupSendPolicy(current?.messageSendMode === "admins" ? "all" : "admins")}>{current?.messageSendMode === "admins" ? "Permitir todos" : "Somente administradores"}</button></>}><div className="group-send-policy"><p>Defina quem pode enviar texto, áudio, imagens, anexos, respostas e encaminhamentos neste grupo.</p><label className={current?.messageSendMode !== "admins" ? "selected" : ""}><input type="radio" name="group-send-policy" checked={current?.messageSendMode !== "admins"} onChange={() => changeGroupSendPolicy("all")} /><span><strong>Todos os participantes</strong><small>Todos continuam lendo e enviando normalmente.</small></span></label><label className={current?.messageSendMode === "admins" ? "selected" : ""}><input type="radio" name="group-send-policy" checked={current?.messageSendMode === "admins"} onChange={() => changeGroupSendPolicy("admins")} /><span><strong>Somente administradores</strong><small>Participantes comuns continuam lendo, mas não enviam mensagens.</small></span></label></div></Modal>}
       {modal === "shared-media" && <SharedMediaModal conversation={current} onClose={() => setModal("")} onOpenMessage={openMessageInConversation} />}
       {modal === "contact" && <TextModal title="Editar contato" label="Nome do contato" initialValue={current.name} onClose={() => setModal("")} onConfirm={(value) => { updateCurrent((conversation) => ({ ...conversation, name: value })); setModal(""); }} />}
       {modal === "end" && <Modal title={internal ? "Encerrar conversa" : "Encerrar atendimento"} onClose={() => setModal("")} footer={<><button className="secondary-button" onClick={() => setModal("")}>Cancelar</button><button className="danger-button" onClick={endConversation}>Confirmar encerramento</button></>}><p>O histórico será preservado e uma nova conversa poderá ser iniciada a qualquer momento.</p></Modal>}
-      {forwarding && <ForwardModal conversations={scopedConversations.filter((conversation) => conversation.id !== current.id && !conversation.ended)} message={forwarding} onClose={() => setForwarding(null)} onConfirm={forwardMessage} />}
+      {forwarding && <ForwardModal conversations={scopedConversations.filter((conversation) => conversation.id !== current.id && !conversation.ended && canSendToConversation(conversation))} message={forwarding} onClose={() => setForwarding(null)} onConfirm={forwardMessage} />}
       {blockedAttachmentAlert && <BlockedAttachmentModal {...blockedAttachmentAlert} onClose={() => setBlockedAttachmentAlert(null)} />}
       {largeAttachmentAlert && <LargeAttachmentModal {...largeAttachmentAlert} onClose={() => setLargeAttachmentAlert(null)} />}
       {toast && <Toast message={toast} tone={toast.includes("dependem") ? "warning" : "success"} onClose={() => setToast("")} />}
@@ -3360,17 +3493,23 @@ function MessageBubble({ id, side, sender, senderId, role, text, time, status, e
     const trigger = triggerRef.current;
     if (!trigger) return { top: 0, left: 0 };
     const rect = trigger.getBoundingClientRect();
-    const width = kind === "reaction" ? 238 : 164;
+    const viewport = window.visualViewport || { width: window.innerWidth, height: window.innerHeight, offsetLeft: 0, offsetTop: 0 };
+    const viewportLeft = viewport.offsetLeft || 0;
+    const viewportTop = viewport.offsetTop || 0;
+    const viewportWidth = viewport.width || window.innerWidth;
+    const viewportHeight = viewport.height || window.innerHeight;
     const height = kind === "reaction" ? 48 : (onEdit ? 146 : 112);
     const margin = 8;
-    const defaultLeft = isOwnMessage ? rect.left - width - margin : rect.right + margin;
-    const alternateLeft = isOwnMessage ? rect.right + margin : rect.left - width - margin;
-    let left = defaultLeft;
-    if (left < margin || left + width > window.innerWidth - margin) left = alternateLeft;
-    left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
-    let top = rect.top + rect.height / 2 - 16;
-    if (top + height > window.innerHeight - margin) top = window.innerHeight - height - margin;
-    top = Math.max(margin, top);
+    const width = Math.min(kind === "reaction" ? 238 : 176, viewportWidth - margin * 2);
+    const rightSpace = viewportLeft + viewportWidth - rect.right - margin;
+    const leftSpace = rect.left - viewportLeft - margin;
+    let left;
+    if (rightSpace >= width || rightSpace >= leftSpace) left = rect.right + margin;
+    else left = rect.left - width - margin;
+    left = Math.max(viewportLeft + margin, Math.min(left, viewportLeft + viewportWidth - width - margin));
+    let top = rect.top + rect.height / 2 - 18;
+    if (top + height > viewportTop + viewportHeight - margin) top = viewportTop + viewportHeight - height - margin;
+    top = Math.max(viewportTop + margin, top);
     return { top: Math.round(top), left: Math.round(left), minWidth: width };
   };
   const openMenu = () => {
@@ -4964,9 +5103,12 @@ function PresenceKeeper({ currentUser }) {
     };
     const connect = () => {
       if (closed) return;
+      window.clearTimeout(reconnectTimer);
+      window.clearInterval(heartbeatTimer);
       socket = new WebSocket(websocketApiUrl("/api/presence"));
       socket.onopen = () => {
         sendPresence("presence:activity");
+        window.clearInterval(heartbeatTimer);
         heartbeatTimer = window.setInterval(() => sendPresence("presence:heartbeat"), 30_000);
       };
       socket.onclose = () => {
@@ -4975,16 +5117,31 @@ function PresenceKeeper({ currentUser }) {
       };
       socket.onerror = () => socket?.close();
     };
+    const ensurePresenceConnected = () => {
+      if (document.hidden) return;
+      if (socket?.readyState === WebSocket.OPEN) {
+        sendPresence("presence:activity");
+        return;
+      }
+      window.clearTimeout(reconnectTimer);
+      connect();
+    };
     connect();
     const activityEvents = ["pointerdown", "keydown", "touchstart", "focus"];
     activityEvents.forEach((eventName) => window.addEventListener(eventName, sendActivity, { passive: true }));
     document.addEventListener("visibilitychange", sendActivity);
+    document.addEventListener("visibilitychange", ensurePresenceConnected);
+    window.addEventListener("pageshow", ensurePresenceConnected);
+    window.addEventListener("online", ensurePresenceConnected);
     return () => {
       closed = true;
       window.clearTimeout(reconnectTimer);
       window.clearInterval(heartbeatTimer);
       activityEvents.forEach((eventName) => window.removeEventListener(eventName, sendActivity));
       document.removeEventListener("visibilitychange", sendActivity);
+      document.removeEventListener("visibilitychange", ensurePresenceConnected);
+      window.removeEventListener("pageshow", ensurePresenceConnected);
+      window.removeEventListener("online", ensurePresenceConnected);
       socket?.close();
     };
   }, [currentUser?.id]);

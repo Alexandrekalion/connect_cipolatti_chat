@@ -388,6 +388,24 @@ function roleLabel(role) {
   return role === "owner" ? "Propriet?rio" : role === "admin" ? "Administrador" : "Participante";
 }
 
+function groupMessageSendMode(conversation) {
+  const raw = String(conversation?.messageSendMode || conversation?.messagePolicy?.sendMode || "all").toLowerCase();
+  return raw === "admins" || raw === "admins_only" || raw === "administrators" ? "admins" : "all";
+}
+
+function canSendInternalMessage(actor, conversation) {
+  ensureInternalShape(conversation);
+  if ((conversation.type || "individual") !== "group") return true;
+  if (groupMessageSendMode(conversation) !== "admins") return true;
+  return ["owner", "admin"].includes(groupRole(conversation, actor?.id));
+}
+
+function assertCanSendInternalMessage(actor, conversation) {
+  if (!canSendInternalMessage(actor, conversation)) {
+    throw permissionError("Somente administradores podem enviar mensagens neste momento.");
+  }
+}
+
 
 function auditDeniedConversationAccess(request, conversationId, action) {
   updateStore((data) => {
@@ -423,6 +441,7 @@ function ensureInternalShape(conversation) {
   conversation.type ||= (conversation.participantIds || []).length > 2 || conversation.title ? "group" : "individual";
   conversation.description ||= "";
   conversation.imageUrl ||= "";
+  conversation.messageSendMode = groupMessageSendMode(conversation);
   conversation.adminIds = Array.isArray(conversation.adminIds) && conversation.adminIds.length
     ? conversation.adminIds
     : [conversation.ownerId].filter(Boolean);
@@ -662,6 +681,8 @@ function internalConversationView(data, conversation, actor = null) {
     participantUsers: participants.map((user) => ({ ...user, groupRole: memberRoles[user.id], groupRoleLabel: roleLabel(memberRoles[user.id]) })),
     memberRoles,
     currentUserGroupRole: actor ? groupRole(conversation, actor.id) : null,
+    messageSendMode: groupMessageSendMode(conversation),
+    canSendMessages: actor ? canSendInternalMessage(actor, conversation) : false,
     participantCount: participants.length,
     unreadCount: actor ? internalUnreadCount(conversation, actor) : 0,
     readAt: actor ? conversation.readBy?.[actor.id] || null : null,
@@ -1412,6 +1433,7 @@ async function handleApi(request, response, url) {
           participantSnapshots: snapshots,
           readBy: Object.fromEntries(requestedIds.map((id) => [id, id === request.auth.id ? now : null])),
           status: "active",
+          messageSendMode: "all",
           createdAt: now,
           updatedAt: now,
           lastMessageAt: now,
@@ -1503,7 +1525,7 @@ async function handleApi(request, response, url) {
     const end = Math.min(messages.length, index + 26);
     return json(response, 200, { conversationId: conversation.id, messageId: aroundMatch[2], messages: messages.slice(start, end), cursors: { before: start > 0 ? messages[start].id : null, after: end < messages.length ? messages[end - 1].id : null } });
   }
-  const internalMatch = url.pathname.match(/^\/api\/internal\/conversations\/([^/]+)(?:\/(messages|audio|files|participants|forward|close|read|react|edit))?$/);
+  const internalMatch = url.pathname.match(/^\/api\/internal\/conversations\/([^/]+)(?:\/(messages|audio|files|participants|send-policy|forward|close|read|react|edit))?$/);
   if (internalMatch && request.method === "GET" && !internalMatch[2]) {
     const data = await readStore();
     const conversation = data.internalConversations.find((item) => item.id === internalMatch[1]);
@@ -1529,6 +1551,7 @@ async function handleApi(request, response, url) {
           throw new Error("Sem permissão para esta conversa.");
         }
         if (conversation.status === "closed") throw new Error("A conversa está encerrada.");
+        assertCanSendInternalMessage(request.auth, conversation);
       }
       const uploadedAudio = internalMatch[2] === "audio" ? await saveUploadedAudio(rawBody, request.headers["content-type"]) : null;
       const uploadedFile = internalMatch[2] === "files" ? await saveUploadedAttachment(rawBody, request.headers["content-type"]) : null;
@@ -1549,6 +1572,7 @@ async function handleApi(request, response, url) {
         }
         if (internalMatch[2] === "messages") {
           if (conversation.status === "closed") throw new Error("A conversa est? encerrada.");
+          assertCanSendInternalMessage(request.auth, conversation);
           const text = String(input.text || "").trim();
           if (!text) throw new Error("Digite uma mensagem.");
           if (input.replyToMessageId && !conversation.messages.some((message) => message.id === input.replyToMessageId)) throw new Error("Mensagem original indisponivel.");
@@ -1583,6 +1607,7 @@ async function handleApi(request, response, url) {
           }
         } else if (internalMatch[2] === "audio") {
           if (conversation.status === "closed") throw new Error("A conversa está encerrada.");
+          assertCanSendInternalMessage(request.auth, conversation);
           const durationSeconds = Math.max(0, Math.min(180, Number.parseInt(String(request.headers["x-audio-duration"] || 0), 10) || 0));
           const replyToMessageId = String(request.headers["x-reply-to-message-id"] || "").trim();
           if (replyToMessageId && !conversation.messages.some((message) => message.id === replyToMessageId && !message.deletedAt)) throw new Error("Mensagem original indisponivel.");
@@ -1603,6 +1628,7 @@ async function handleApi(request, response, url) {
           });
         } else if (internalMatch[2] === "files") {
           if (conversation.status === "closed") throw new Error("A conversa est? encerrada.");
+          assertCanSendInternalMessage(request.auth, conversation);
           const replyToMessageId = String(request.headers["x-reply-to-message-id"] || "").trim();
           const clientMessageId = String(request.headers["x-client-message-id"] || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
           const caption = cleanAttachmentCaption(request.headers["x-attachment-caption"]);
@@ -1774,6 +1800,29 @@ async function handleApi(request, response, url) {
               }
             }
           }
+        } else if (internalMatch[2] === "send-policy") {
+          if (conversation.status === "closed") throw new Error("A conversa está encerrada.");
+          ensureInternalShape(conversation);
+          if (conversation.type !== "group") throw new Error("Conversa individual não possui controle de envio.");
+          if (!canManageInternalConversation(request.auth, conversation)) throw permissionError("Somente administradores do grupo podem alterar quem envia mensagens.");
+          const nextMode = String(input.messageSendMode || input.sendMode || "").toLowerCase() === "admins" ? "admins" : "all";
+          const previousMode = groupMessageSendMode(conversation);
+          conversation.messageSendMode = nextMode;
+          if (previousMode !== nextMode) {
+            const text = nextMode === "admins"
+              ? `${request.auth.name} alterou o grupo para somente administradores enviarem mensagens.`
+              : `${request.auth.name} permitiu que todos os participantes enviem mensagens.`;
+            conversation.messages.push({
+              id: createId("internal-msg"),
+              type: "system",
+              senderId: null,
+              sender: "Sistema",
+              text,
+              createdAt: new Date().toISOString(),
+              status: "system",
+            });
+            conversation.events.push(internalEvent("message_send_policy_changed", request.auth, text, { messageSendMode: nextMode }));
+          }
         } else if (internalMatch[2] === "forward") {
           if (conversation.status === "closed") throw new Error("A conversa est? encerrada.");
           const original = (conversation.messages || []).find((message) => message.id === input.messageId && message.type !== "system");
@@ -1785,6 +1834,7 @@ async function handleApi(request, response, url) {
             if (!destination) throw new Error("Conversa de destino nao encontrada.");
             if (!canAccessInternalConversation(request.auth, destination)) throw new Error("Sem permissao para encaminhar para este destino.");
             if (destination.status === "closed") throw new Error("Uma conversa de destino esta encerrada.");
+            assertCanSendInternalMessage(request.auth, destination);
             const comment = String(input.comment || "").trim();
             const albumMessages = original.albumId
               ? (conversation.messages || []).filter((message) => message.albumId === original.albumId && message.type === "file" && !message.deletedAt).sort((a, b) => (a.batchOrder || 0) - (b.batchOrder || 0))
