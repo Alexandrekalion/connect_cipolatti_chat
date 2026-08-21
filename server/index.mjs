@@ -122,6 +122,17 @@ async function removeDeadPushSubscription(endpoint) {
   });
 }
 
+async function deliverWebPush(item, payload) {
+  const result = await webpush.sendNotification({ endpoint: item.endpoint, expirationTime: item.expirationTime || null, keys: item.keys }, JSON.stringify(payload), {
+    TTL: 60 * 60 * 6,
+    urgency: "normal",
+  });
+  return {
+    statusCode: result?.statusCode || 201,
+    headers: result?.headers || {},
+  };
+}
+
 async function sendPushToUser(data, userId, payloadFactory, meta = {}) {
   if (!pushConfigured()) return;
   const user = (data.users || []).find((item) => item.id === userId);
@@ -131,11 +142,9 @@ async function sendPushToUser(data, userId, payloadFactory, meta = {}) {
   const payload = payloadFactory(user);
   await Promise.allSettled(subscriptions.map(async (item) => {
     try {
-      await webpush.sendNotification({ endpoint: item.endpoint, expirationTime: item.expirationTime || null, keys: item.keys }, JSON.stringify(payload), {
-        TTL: 60 * 60 * 6,
-        urgency: "normal",
-      });
+      const result = await deliverWebPush(item, payload);
       item.lastUsedAt = new Date().toISOString();
+      console.info(`Web Push enviado para ${userId}/${endpointHash(item.endpoint)}: ${result.statusCode}`);
     } catch (error) {
       if ([404, 410].includes(Number(error.statusCode))) {
         await removeDeadPushSubscription(item.endpoint);
@@ -1120,6 +1129,57 @@ async function handleApi(request, response, url) {
       return json(response, 200, { ok: true, removed });
     } catch (error) {
       return json(response, requestErrorStatus(error), { error: error.message });
+    }
+  }
+
+  if (url.pathname === "/api/push/test" && request.method === "POST") {
+    if (!pushConfigured()) return json(response, 503, { error: "Web Push ainda não está configurado no servidor." });
+    let endpoint = "";
+    try {
+      const input = JSON.parse((await readBody(request, 32 * 1024)).toString("utf8") || "{}");
+      endpoint = String(input.endpoint || "").trim();
+      if (!endpoint) return json(response, 400, { error: "Subscription do dispositivo não informada." });
+      let target;
+      await updateStore((data) => {
+        target = ensurePushSubscriptions(data).find((item) => item.userId === request.auth.id && item.endpoint === endpoint);
+        if (!target) throw new Error("Subscription deste dispositivo não encontrada no servidor.");
+        target.lastTestAt = new Date().toISOString();
+      });
+      const payload = {
+        title: "Chat | Cipolatti",
+        body: "Teste de notificação push em background.",
+        icon: "/chat-cipolatti-icon-v3-192.png",
+        badge: "/chat-cipolatti-icon-v3-192.png",
+        tag: `cipolatti-push-test-${request.auth.id}`,
+        renotify: true,
+        silent: false,
+        vibrate: [200, 100, 200],
+        requireInteraction: false,
+        timestamp: Date.now(),
+        data: {
+          type: "push_test",
+          conversationId: "",
+          messageId: "",
+          notificationId: "",
+          testedAt: new Date().toISOString(),
+        },
+      };
+      const result = await deliverWebPush(target, payload);
+      await updateStore((data) => {
+        const row = ensurePushSubscriptions(data).find((item) => item.userId === request.auth.id && item.endpoint === endpoint);
+        if (row) {
+          row.lastUsedAt = new Date().toISOString();
+          row.lastTestStatus = result.statusCode;
+        }
+      });
+      console.info(`Web Push de teste enviado para ${request.auth.id}/${endpointHash(endpoint)}: ${result.statusCode}`);
+      return json(response, 200, { ok: true, statusCode: result.statusCode, endpointHash: endpointHash(endpoint) });
+    } catch (error) {
+      if ([404, 410].includes(Number(error.statusCode))) {
+        if (endpoint) await removeDeadPushSubscription(endpoint);
+      }
+      console.warn(`Falha no Web Push de teste para ${request.auth?.id || "sem usuario"}: ${error.statusCode || ""} ${error.message || error}`);
+      return json(response, requestErrorStatus(error), { error: error.message, statusCode: error.statusCode || undefined });
     }
   }
 

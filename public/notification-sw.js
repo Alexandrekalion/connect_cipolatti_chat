@@ -1,4 +1,4 @@
-self.CIPOLATTI_CHAT_SW_VERSION = "20260821-web-push-v1";
+self.CIPOLATTI_CHAT_SW_VERSION = "20260821-web-push-v2";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -25,12 +25,17 @@ self.addEventListener("push", (event) => {
   const payload = parsePushPayload(event);
   const data = payload.data || {};
   const title = payload.title || "Chat | Cipolatti";
+  const tag = payload.tag || data.messageId || data.conversationId || data.notificationId || "cipolatti-chat";
   const options = {
     body: payload.body || "Você tem uma nova atualização no Chat | Cipolatti.",
     icon: payload.icon || "/chat-cipolatti-icon-v3-192.png",
     badge: payload.badge || "/chat-cipolatti-icon-v3-192.png",
-    tag: payload.tag || data.conversationId || data.notificationId || "cipolatti-chat",
+    tag,
     renotify: payload.renotify !== false,
+    silent: false,
+    timestamp: payload.timestamp || Date.now(),
+    vibrate: payload.vibrate || [200, 100, 200],
+    requireInteraction: payload.requireInteraction === true,
     data,
   };
   event.waitUntil(self.registration.showNotification(title, options));
