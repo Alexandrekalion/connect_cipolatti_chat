@@ -1,4 +1,4 @@
-self.CIPOLATTI_CHAT_SW_VERSION = "20260821-push-mobile-prompt-v1";
+self.CIPOLATTI_CHAT_SW_VERSION = "20260821-mobile-settings-nav-v1";
 self.CIPOLATTI_CHAT_CACHE_PREFIX = "cipolatti-chat-";
 self.CIPOLATTI_CHAT_CACHE_NAME = `${self.CIPOLATTI_CHAT_CACHE_PREFIX}${self.CIPOLATTI_CHAT_SW_VERSION}`;
 
