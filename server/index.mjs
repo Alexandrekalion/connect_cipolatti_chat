@@ -292,6 +292,18 @@ function requestErrorStatus(error) {
   return 400;
 }
 
+function webPushDeliveryErrorStatus(error) {
+  const code = String(error?.code || error?.cause?.code || "").toUpperCase();
+  const message = String(error?.message || "");
+  const nestedErrors = Array.isArray(error?.errors) ? error.errors : Array.isArray(error?.cause?.errors) ? error.cause.errors : [];
+  const nestedCodes = nestedErrors.map((item) => String(item?.code || "").toUpperCase());
+  if (error?.statusCode) return Number(error.statusCode);
+  if (code === "ETIMEDOUT" || nestedCodes.includes("ETIMEDOUT") || /ETIMEDOUT|timeout/i.test(message)) return 504;
+  if (["ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "ENOTFOUND", "EAI_AGAIN"].includes(code)
+    || nestedCodes.some((item) => ["ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "ENOTFOUND", "EAI_AGAIN"].includes(item))) return 502;
+  return requestErrorStatus(error);
+}
+
 function webhookPayloadSummary(payload) {
   const changes = (payload.entry || []).flatMap((entry) => entry.changes || []);
   const values = changes.map((change) => change.value || {});
@@ -1179,7 +1191,7 @@ async function handleApi(request, response, url) {
         if (endpoint) await removeDeadPushSubscription(endpoint);
       }
       console.warn(`Falha no Web Push de teste para ${request.auth?.id || "sem usuario"}: ${error.statusCode || ""} ${error.message || error}`);
-      return json(response, requestErrorStatus(error), { error: error.message, statusCode: error.statusCode || undefined });
+      return json(response, webPushDeliveryErrorStatus(error), { error: error.message || "Falha externa ao enviar Web Push.", statusCode: error.statusCode || undefined });
     }
   }
 
