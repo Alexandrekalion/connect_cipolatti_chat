@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import crypto from "node:crypto";
 import path from "node:path";
+import webpush from "web-push";
 import { getSecureConfig, publicConfig, saveSecureConfig } from "./config.mjs";
 import { createId, dataDir, initStore, readStore, updateStore } from "./store.mjs";
 import {
@@ -34,10 +35,186 @@ await ensureAuthSchema();
 
 const port = Number(process.env.PORT || 3001);
 const releaseVersion = "2026.06.21-collaboration-persistence-v1";
+const vapidPublicKey = String(process.env.VAPID_PUBLIC_KEY || "").trim();
+const vapidPrivateKey = String(process.env.VAPID_PRIVATE_KEY || "").trim();
+const vapidSubject = String(process.env.VAPID_SUBJECT || "mailto:ti@cipolatti.com.br").trim();
+
+if (vapidPublicKey && vapidPrivateKey) {
+  webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
+}
 
 function json(response, status, payload) {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
   response.end(JSON.stringify(payload));
+}
+
+function pushConfigured() {
+  return Boolean(vapidPublicKey && vapidPrivateKey);
+}
+
+function endpointHash(endpoint = "") {
+  return crypto.createHash("sha256").update(String(endpoint)).digest("hex").slice(0, 16);
+}
+
+function ensurePushSubscriptions(data) {
+  data.pushSubscriptions = Array.isArray(data.pushSubscriptions) ? data.pushSubscriptions : [];
+  return data.pushSubscriptions;
+}
+
+function sanitizePushSubscription(input = {}) {
+  const subscription = input.subscription && typeof input.subscription === "object" ? input.subscription : input;
+  const endpoint = String(subscription.endpoint || "").trim();
+  const p256dh = String(subscription.keys?.p256dh || "").trim();
+  const auth = String(subscription.keys?.auth || "").trim();
+  if (!endpoint || !/^https:\/\//i.test(endpoint)) throw new Error("Assinatura push inválida.");
+  if (!p256dh || !auth) throw new Error("Chaves da assinatura push ausentes.");
+  return {
+    endpoint,
+    expirationTime: subscription.expirationTime || null,
+    keys: { p256dh, auth },
+  };
+}
+
+function quietHoursActive(preferences = {}, now = new Date()) {
+  const start = String(preferences.quietHoursStart || "");
+  const end = String(preferences.quietHoursEnd || "");
+  if (!/^\d{2}:\d{2}$/.test(start) || !/^\d{2}:\d{2}$/.test(end) || start === end) return false;
+  const localTime = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: process.env.TZ || "America/Sao_Paulo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(now);
+  const [hour, minute] = localTime.split(":").map(Number);
+  const [startHour, startMinute] = start.split(":").map(Number);
+  const [endHour, endMinute] = end.split(":").map(Number);
+  const current = hour * 60 + minute;
+  const startMinutes = startHour * 60 + startMinute;
+  const endMinutes = endHour * 60 + endMinute;
+  return startMinutes < endMinutes
+    ? current >= startMinutes && current < endMinutes
+    : current >= startMinutes || current < endMinutes;
+}
+
+function pushAllowedForUser(user, { isGroup = false } = {}) {
+  const preferences = user?.preferences || {};
+  if (preferences.notifications === false) return false;
+  if (preferences.browserNotifications === false) return false;
+  if (preferences.doNotDisturb === true || quietHoursActive(preferences)) return false;
+  if (isGroup && preferences.notifyGroups === false) return false;
+  if (!isGroup && preferences.notifyDirectMessages === false) return false;
+  return true;
+}
+
+function pushMessagePreview(message = {}, showContent = true) {
+  if (!showContent) return "Abra o Chat | Cipolatti para ver a nova mensagem.";
+  if (message.type === "audio") return "Mensagem de áudio";
+  if (message.type === "file") {
+    const name = message.file?.originalName || message.file?.name || "arquivo";
+    return `Arquivo: ${name}`;
+  }
+  return String(message.text || "Nova mensagem").replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+async function removeDeadPushSubscription(endpoint) {
+  await updateStore((data) => {
+    data.pushSubscriptions = ensurePushSubscriptions(data).filter((item) => item.endpoint !== endpoint);
+  });
+}
+
+async function sendPushToUser(data, userId, payloadFactory, meta = {}) {
+  if (!pushConfigured()) return;
+  const user = (data.users || []).find((item) => item.id === userId);
+  if (!user || !pushAllowedForUser(user, meta)) return;
+  const subscriptions = ensurePushSubscriptions(data).filter((item) => item.userId === userId && item.endpoint && item.keys?.p256dh && item.keys?.auth);
+  if (!subscriptions.length) return;
+  const payload = payloadFactory(user);
+  await Promise.allSettled(subscriptions.map(async (item) => {
+    try {
+      await webpush.sendNotification({ endpoint: item.endpoint, expirationTime: item.expirationTime || null, keys: item.keys }, JSON.stringify(payload), {
+        TTL: 60 * 60 * 6,
+        urgency: "normal",
+      });
+      item.lastUsedAt = new Date().toISOString();
+    } catch (error) {
+      if ([404, 410].includes(Number(error.statusCode))) {
+        await removeDeadPushSubscription(item.endpoint);
+        return;
+      }
+      console.warn(`Falha ao enviar Web Push para ${userId}/${endpointHash(item.endpoint)}: ${error.statusCode || ""} ${error.message || error}`);
+    }
+  }));
+}
+
+function dispatchPushJob(job) {
+  sendPushJob(job).catch((error) => console.warn(`Falha no dispatch Web Push: ${error.message || error}`));
+}
+
+async function sendPushJob(job) {
+  const data = await readStore();
+  if (job.type === "notification") return sendNotificationPush(data, job.notificationId);
+  return sendInternalMessagePush(data, job.conversationId, job.messageId, job.senderId);
+}
+
+async function sendNotificationPush(data, notificationId) {
+  const notification = (data.notifications || []).find((item) => item.id === notificationId);
+  if (!notification) return;
+  const conversation = notificationConversation(data, notification);
+  const recipients = [...new Set([notification.userId, ...(notification.userIds || [])].filter(Boolean))]
+    .filter((userId) => userId !== notification.actorId);
+  await Promise.all(recipients.map((userId) => sendPushToUser(data, userId, (user) => {
+    const message = notificationTextForActor(notification, user, data) || notification.message || "Abra o Chat | Cipolatti para ver a atualização.";
+    return {
+      title: notification.title || "Chat | Cipolatti",
+      body: message,
+      icon: "/chat-cipolatti-icon-v3-192.png",
+      badge: "/chat-cipolatti-icon-v3-192.png",
+      tag: `cipolatti-notification-${notification.id}`,
+      renotify: true,
+      data: {
+        type: notification.type || "notification",
+        notificationId: notification.id,
+        conversationId: linkedNotificationConversationId(notification),
+        messageId: notification.messageId || "",
+        groupId: notification.groupId || conversation?.id || "",
+        isGroup: Boolean(notification.groupId || conversation?.type === "group"),
+      },
+    };
+  }, { isGroup: Boolean(notification.groupId || conversation?.type === "group") })));
+}
+
+async function sendInternalMessagePush(data, conversationId, messageId, senderId) {
+  const conversation = (data.internalConversations || []).find((item) => item.id === conversationId);
+  if (!conversation) return;
+  ensureInternalShape(conversation);
+  const message = (conversation.messages || []).find((item) => item.id === messageId);
+  if (!message || message.deletedAt || message.type === "system") return;
+  const isGroup = conversation.type === "group";
+  const recipients = (conversation.participantIds || []).filter((id) => id && id !== senderId);
+  await Promise.all(recipients.map((userId) => sendPushToUser(data, userId, (user) => {
+    const showContent = user.preferences?.showNotificationContent !== false;
+    const senderName = message.sender || "CIPOLATTI";
+    const title = isGroup
+      ? `Nova mensagem em ${conversation.title || "Grupo interno"}`
+      : `Nova mensagem de ${senderName}`;
+    const preview = pushMessagePreview(message, showContent);
+    return {
+      title,
+      body: showContent ? `${senderName}: ${preview}` : preview,
+      icon: "/chat-cipolatti-icon-v3-192.png",
+      badge: "/chat-cipolatti-icon-v3-192.png",
+      tag: `cipolatti-${conversation.id}`,
+      renotify: true,
+      data: {
+        type: "message",
+        conversationId: conversation.id,
+        messageId: message.id,
+        senderId: message.senderId || senderId || "",
+        groupId: isGroup ? conversation.id : "",
+        isGroup,
+      },
+    };
+  }, { isGroup })));
 }
 
 async function readBody(request, limit = 5 * 1024 * 1024) {
@@ -564,8 +741,9 @@ function hasEquivalentNotification(data, draft) {
 function addNotificationOnce(data, draft) {
   data.notifications ||= [];
   if (hasEquivalentNotification(data, draft)) return false;
-  data.notifications.unshift({ id: createId("notification"), ...draft });
-  return true;
+  const notification = { id: createId("notification"), ...draft };
+  data.notifications.unshift(notification);
+  return notification;
 }
 
 function notificationView(notification, actor, data = null) {
@@ -890,6 +1068,59 @@ async function handleApi(request, response, url) {
       code: request.authError?.code || undefined,
       title: request.authError?.title || undefined,
     });
+  }
+
+  if (url.pathname === "/api/push/public-key" && request.method === "GET") {
+    return json(response, 200, { configured: pushConfigured(), publicKey: vapidPublicKey });
+  }
+
+  if (url.pathname === "/api/push/subscribe" && request.method === "POST") {
+    if (!pushConfigured()) return json(response, 503, { error: "Web Push ainda não está configurado no servidor." });
+    try {
+      const input = JSON.parse((await readBody(request, 32 * 1024)).toString("utf8") || "{}");
+      const subscription = sanitizePushSubscription(input);
+      let saved;
+      await updateStore((data) => {
+        const rows = ensurePushSubscriptions(data);
+        const now = new Date().toISOString();
+        let row = rows.find((item) => item.endpoint === subscription.endpoint);
+        if (!row) {
+          row = { id: createId("push-subscription"), createdAt: now };
+          rows.push(row);
+        }
+        Object.assign(row, {
+          ...subscription,
+          userId: request.auth.id,
+          userAgent: String(request.headers["user-agent"] || "").slice(0, 300),
+          updatedAt: now,
+          lastSeenAt: now,
+        });
+        saved = row;
+      });
+      return json(response, 200, { ok: true, subscription: { id: saved.id, endpointHash: endpointHash(saved.endpoint), updatedAt: saved.updatedAt } });
+    } catch (error) {
+      return json(response, requestErrorStatus(error), { error: error.message });
+    }
+  }
+
+  if (url.pathname === "/api/push/subscribe" && request.method === "DELETE") {
+    try {
+      const input = JSON.parse((await readBody(request, 32 * 1024)).toString("utf8") || "{}");
+      const endpoint = String(input.endpoint || input.subscription?.endpoint || "").trim();
+      let removed = 0;
+      await updateStore((data) => {
+        const before = ensurePushSubscriptions(data).length;
+        data.pushSubscriptions = ensurePushSubscriptions(data).filter((item) => {
+          if (item.userId !== request.auth.id) return true;
+          if (endpoint && item.endpoint !== endpoint) return true;
+          return false;
+        });
+        removed = before - data.pushSubscriptions.length;
+      });
+      return json(response, 200, { ok: true, removed });
+    } catch (error) {
+      return json(response, requestErrorStatus(error), { error: error.message });
+    }
   }
 
   if (url.pathname === "/api/me/out-of-office" && request.method === "GET") {
@@ -1541,6 +1772,7 @@ async function handleApi(request, response, url) {
     const input = ["audio", "files"].includes(internalMatch[2]) ? {} : JSON.parse(rawBody.toString("utf8") || "{}");
     let updated;
     let skippedDuplicateMessage = false;
+    const pushJobs = [];
     try {
       if (["audio", "files"].includes(internalMatch[2])) {
         const snapshot = await readStore();
@@ -1595,7 +1827,7 @@ async function handleApi(request, response, url) {
           if (duplicate) {
             skippedDuplicateMessage = true;
           } else {
-            conversation.messages.push({
+            const message = {
               id: createId("internal-msg"), type: "message",
               senderId: request.auth.id, sender: request.auth.name,
               role: request.auth.role, text, createdAt: now.toISOString(),
@@ -1603,7 +1835,9 @@ async function handleApi(request, response, url) {
               forwardedFrom: input.forwardedFrom || null,
               clientMessageId: clientMessageId || null,
               status: "sent",
-            });
+            };
+            conversation.messages.push(message);
+            pushJobs.push({ type: "message", conversationId: conversation.id, messageId: message.id, senderId: request.auth.id });
           }
         } else if (internalMatch[2] === "audio") {
           if (conversation.status === "closed") throw new Error("A conversa está encerrada.");
@@ -1611,7 +1845,7 @@ async function handleApi(request, response, url) {
           const durationSeconds = Math.max(0, Math.min(180, Number.parseInt(String(request.headers["x-audio-duration"] || 0), 10) || 0));
           const replyToMessageId = String(request.headers["x-reply-to-message-id"] || "").trim();
           if (replyToMessageId && !conversation.messages.some((message) => message.id === replyToMessageId && !message.deletedAt)) throw new Error("Mensagem original indisponivel.");
-          conversation.messages.push({
+          const message = {
             id: createId("internal-msg"), type: "audio",
             senderId: request.auth.id, sender: request.auth.name,
             role: request.auth.role, text: "Mensagem de áudio", createdAt: new Date().toISOString(),
@@ -1625,7 +1859,9 @@ async function handleApi(request, response, url) {
             replyToMessageId: replyToMessageId || null,
             forwardedFrom: null,
             status: "sent",
-          });
+          };
+          conversation.messages.push(message);
+          pushJobs.push({ type: "message", conversationId: conversation.id, messageId: message.id, senderId: request.auth.id });
         } else if (internalMatch[2] === "files") {
           if (conversation.status === "closed") throw new Error("A conversa est? encerrada.");
           assertCanSendInternalMessage(request.auth, conversation);
@@ -1645,7 +1881,7 @@ async function handleApi(request, response, url) {
             updated = conversation;
             return;
           }
-          conversation.messages.push({
+          const message = {
             id: createId("internal-msg"), type: "file",
             senderId: request.auth.id, sender: request.auth.name,
             role: request.auth.role, text: batchOrder === 1 ? albumCaption || caption : caption,
@@ -1660,7 +1896,9 @@ async function handleApi(request, response, url) {
             forwardedFrom: null,
             clientMessageId: clientMessageId || null,
             status: "sent",
-          });
+          };
+          conversation.messages.push(message);
+          pushJobs.push({ type: "message", conversationId: conversation.id, messageId: message.id, senderId: request.auth.id });
         } else if (internalMatch[2] === "react") {
           if (conversation.status === "closed") throw new Error("A conversa est? encerrada.");
           ensureInternalShape(conversation);
@@ -1775,7 +2013,7 @@ async function handleApi(request, response, url) {
                 conversation.readBy[participant.id] = null;
                                 conversation.messages.push({ id: createId("internal-msg"), type: "system", senderId: null, sender: "Sistema", text: `${participant.name} foi adicionado ao grupo por ${request.auth.name}.`, createdAt: now, status: "system", notifyUserIds: [participant.id] });
                 conversation.events.push(internalEvent("participant_added", request.auth, `${participant.name} foi adicionado por ${request.auth.name}.`, { targetUserId: participant.id, groupId: conversation.id }));
-                addNotificationOnce(data, {
+                const notification = addNotificationOnce(data, {
                   type: "group_participant_added",
                   eventType: "group_participant_added",
                   title: "Grupo atualizado",
@@ -1797,6 +2035,7 @@ async function handleApi(request, response, url) {
                   resolvedBy: {},
                   createdAt: now,
                 });
+                if (notification) pushJobs.push({ type: "notification", notificationId: notification.id });
               }
             }
           }
@@ -1843,7 +2082,7 @@ async function handleApi(request, response, url) {
               const forwardedAlbumId = createId("album");
               const albumCaption = comment || original.albumCaption || original.text || "";
               for (const [index, item] of albumMessages.entries()) {
-                destination.messages.push({
+                const message = {
                   id: createId("internal-msg"), type: "file",
                   senderId: request.auth.id, sender: request.auth.name, role: request.auth.role,
                   text: index === 0 ? albumCaption : item.itemCaption || "",
@@ -1857,10 +2096,12 @@ async function handleApi(request, response, url) {
                   createdAt: new Date().toISOString(), replyToMessageId: null,
                   forwardedFrom: { conversationId: conversation.id, messageId: original.id, sender: original.sender, type: "album" },
                   status: "sent",
-                });
+                };
+                destination.messages.push(message);
+                pushJobs.push({ type: "message", conversationId: destination.id, messageId: message.id, senderId: request.auth.id });
               }
             } else {
-              destination.messages.push({
+              const message = {
                 id: createId("internal-msg"), type: original.type === "audio" ? "audio" : original.type === "file" ? "file" : "message",
                 senderId: request.auth.id, sender: request.auth.name, role: request.auth.role,
                 text: comment || original.text || "Mensagem encaminhada",
@@ -1869,7 +2110,9 @@ async function handleApi(request, response, url) {
                 createdAt: new Date().toISOString(), replyToMessageId: null,
                 forwardedFrom: { conversationId: conversation.id, messageId: original.id, sender: original.sender, type: original.type || "message" },
                 status: "sent",
-              });
+              };
+              destination.messages.push(message);
+              pushJobs.push({ type: "message", conversationId: destination.id, messageId: message.id, senderId: request.auth.id });
             }
             destination.updatedAt = new Date().toISOString();
             destination.lastMessageAt = destination.updatedAt;
@@ -1888,7 +2131,8 @@ async function handleApi(request, response, url) {
           });
         }
         if (["messages", "audio", "files"].includes(internalMatch[2]) && !skippedDuplicateMessage) {
-          maybeAppendOutOfOfficeReply(data, conversation, request.auth.id);
+          const automaticReply = maybeAppendOutOfOfficeReply(data, conversation, request.auth.id);
+          if (automaticReply) pushJobs.push({ type: "message", conversationId: conversation.id, messageId: automaticReply.id, senderId: automaticReply.senderId });
         }
         conversation.updatedAt = new Date().toISOString();
         conversation.lastMessageAt = conversation.updatedAt;
@@ -1899,6 +2143,7 @@ async function handleApi(request, response, url) {
       });
       const data = await readStore();
       const view = internalConversationView(data, updated, request.auth);
+      pushJobs.forEach(dispatchPushJob);
       if (internalMatch[2] === "read") return json(response, 200, { conversation: view, counts: buildUnreadCounts(data, request.auth) });
       if (internalMatch[2] === "messages") view.skippedDuplicateMessage = skippedDuplicateMessage;
       return json(response, ["messages", "audio", "files"].includes(internalMatch[2]) && !skippedDuplicateMessage ? 201 : 200, view);
