@@ -1393,18 +1393,20 @@ body,
 .participants-modal-list {
   min-height: 0;
   flex: 1 1 auto;
-  display: grid;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 2px 6px 2px 2px;
   scrollbar-gutter: stable;
+  overscroll-behavior: contain;
 }
 
 .participant-modal-row {
   position: relative;
   flex: 0 0 auto;
+  flex-shrink: 0;
   min-height: 64px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 132px;
@@ -1428,6 +1430,7 @@ body,
   width: 40px;
   height: 40px;
   font-size: 10px;
+  flex: 0 0 40px;
 }
 
 .participant-role-badge {
@@ -1553,16 +1556,24 @@ body,
     padding: 12px;
   }
   .participants-modal-list {
+    display: flex;
+    flex-direction: column;
+    align-content: initial;
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
     padding: 2px;
+    gap: 10px;
     scrollbar-gutter: auto;
   }
   .participant-modal-row {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    min-height: 0;
+    flex: 0 0 auto;
+    flex-shrink: 0;
+    min-height: 92px;
     height: auto;
     padding: 12px;
     align-items: stretch;
@@ -1576,6 +1587,7 @@ body,
   .participant-card-head .avatar-sm {
     width: 42px;
     height: 42px;
+    flex: 0 0 42px;
   }
   .participant-modal-row strong,
   .participant-modal-row small {
@@ -2656,7 +2668,7 @@ body.attachment-modal-open .modal-backdrop {
 .shared-media-tabs button { height: 30px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--muted); padding: 0 10px; cursor: pointer; white-space: nowrap; }
 .shared-media-tabs button.active { background: var(--soft); color: var(--text-strong); border-color: rgba(196,154,44,.55); }
 .shared-media-list { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; overflow-x: hidden; padding-right: 6px; scrollbar-gutter: stable; }
-.shared-media-item { flex: 0 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 70px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.025); }
+.shared-media-item { flex: 0 0 auto; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 70px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.025); }
 .shared-media-card-main { min-width: 0; display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 12px; align-items: center; }
 .shared-media-preview { width: 56px; height: 50px; border-radius: 6px; background: var(--soft); display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .shared-media-preview img { width: 100%; height: 100%; object-fit: cover; }
@@ -2664,6 +2676,7 @@ body.attachment-modal-open .modal-backdrop {
 .shared-media-info strong,.shared-media-info span,.shared-media-info small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .shared-media-info span,.shared-media-info small { color: var(--muted); font-size: 10px; }
 .shared-media-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.shared-media-actions .primary-button { min-width: 150px; justify-content: center; }
 .system-message-out-of-office{display:grid;gap:5px;border:1px solid rgba(196,154,44,.45);background:rgba(196,154,44,.1);text-align:left}
 .system-message-out-of-office strong{font-size:10px;color:#e2bd67;text-transform:uppercase;letter-spacing:.02em}
 .system-message.message-located{animation:locatedMessagePulse 3s ease-out;box-shadow:0 0 0 2px rgba(196,154,44,.72),0 0 28px rgba(196,154,44,.28)}
@@ -2803,9 +2816,8 @@ body.attachment-modal-open .modal-backdrop {
   .shared-media-preview { width: 56px; height: 56px; }
   .shared-media-info { min-width: 0; gap: 4px; }
   .shared-media-info strong,.shared-media-info span,.shared-media-info small { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; word-break: break-word; line-height: 1.25; }
-  .shared-media-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); justify-content: stretch; gap: 8px; }
-  .shared-media-actions button, .shared-media-actions a { width: 100%; min-height: 40px; justify-content: center; text-align: center; white-space: normal; }
-  .shared-media-actions .primary-button { grid-column: 1 / -1; }
+  .shared-media-actions { display: flex; justify-content: stretch; gap: 8px; }
+  .shared-media-actions button { width: 100%; min-height: 40px; justify-content: center; text-align: center; white-space: normal; }
   .shared-media-tabs button { min-height: 38px; font-size: 12px; }
 
   .data-table-panel, .contacts-table-panel, .table-scroll { overflow-x: auto; max-width: 100%; }

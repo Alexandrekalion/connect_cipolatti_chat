@@ -17,7 +17,7 @@ import { activity, chartData, contacts, departments, users } from "./data";
 const BRAND_NAME = "CIPOLATTI";
 const BRAND_SUBTITLE = "Central de Atendimento Corporativo";
 const BRAND_ICON = `${import.meta.env.BASE_URL}cipolatti-icon.png`;
-const FRONTEND_BUILD_VERSION = "2026.08.21.9";
+const FRONTEND_BUILD_VERSION = "2026.08.21.10";
 const DEFAULT_API_TIMEOUT_MS = 15000;
 const LOGIN_API_TIMEOUT_MS = 15000;
 const appLifecycle = { hiddenAt: 0, resumedAt: Date.now() };
@@ -2926,8 +2926,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
     if (action === "participants") return setModal("participants");
     if (action === "message-policy") return setModal("message-policy");
     if (action === "shared-media") return setModal("shared-media");
-    if (action === "mute") return setToast("Silenciar notificações será disponibilizado em uma próxima etapa.");
-    if (action === "export") return setToast("Exportar conversa será disponibilizado em uma próxima etapa.");
+    if (action === "mute") return setToast("Silenciar grupo será disponibilizado em uma próxima etapa.");
     if (action === "edit") return setToast("Editar grupo será disponibilizado em uma próxima etapa.");
     if (action === "image") return setToast("Alterar imagem será disponibilizado em uma próxima etapa.");
     if (action === "leave") return leaveGroup();
@@ -3090,7 +3089,7 @@ function ChatPage({ internal = false, groupOnly = false, currentUser = users[0] 
             {!internal && <button className="secondary-button" onClick={() => setModal("transfer")}><ArrowLeftRight size={17} /> Transferir</button>}
             {internal && <button className="secondary-button" onClick={() => setModal("shared-media")}><Paperclip size={17} /> Midias</button>}
             {internal && current.type === "group" && currentCanManageGroup && <button className="secondary-button" onClick={() => setModal("participant")}><UserPlus size={17} /> Adicionar pessoa</button>}
-            {internal && current.type === "group" && <div className="chat-more"><button className="icon-button" aria-label="Mais opções" onClick={() => setMoreMenuOpen((value) => !value)}><MoreHorizontal size={19}/></button>{moreMenuOpen && <div className="chat-more-menu"><button onClick={() => handleMoreAction("edit")}>Editar grupo</button><button onClick={() => handleMoreAction("image")}>Alterar imagem</button><button onClick={() => handleMoreAction("participants")}>Ver participantes</button>{currentCanManageGroup && <button onClick={() => handleMoreAction("message-policy")}>Permitir mensagens</button>}<button onClick={() => handleMoreAction("shared-media")}>Midias compartilhadas</button><button onClick={() => handleMoreAction("mute")}>Silenciar notificações</button><button onClick={() => handleMoreAction("export")}>Exportar conversa (futuro)</button><button className="danger-option" disabled={current.ended} onClick={() => handleMoreAction("end")}>Encerrar grupo</button><button onClick={() => handleMoreAction("leave")}>Sair do grupo</button></div>}</div>}
+            {internal && current.type === "group" && <div className="chat-more"><button className="icon-button" aria-label="Mais opções" onClick={() => setMoreMenuOpen((value) => !value)}><MoreHorizontal size={19}/></button>{moreMenuOpen && <div className="chat-more-menu"><button onClick={() => handleMoreAction("edit")}>Editar grupo</button><button onClick={() => handleMoreAction("image")}>Alterar imagem</button><button onClick={() => handleMoreAction("participants")}>Ver participantes</button>{currentCanManageGroup && <button onClick={() => handleMoreAction("message-policy")}>Permitir mensagens</button>}<button onClick={() => handleMoreAction("shared-media")}>Midias compartilhadas</button><button onClick={() => handleMoreAction("mute")}>Silenciar grupo</button><button className="danger-option" disabled={current.ended} onClick={() => handleMoreAction("end")}>Encerrar grupo</button><button onClick={() => handleMoreAction("leave")}>Sair do grupo</button></div>}</div>}
             {internal ? <button className="secondary-button" onClick={() => setConversationSearchOpen(true)}><Search size={17} /> Buscar na conversa</button> : <button className="danger-button" disabled={current.ended} onClick={() => setModal("end")}>{current.ended ? "Atendimento encerrado" : "Encerrar atendimento"}</button>}
           </div>
         </header>
@@ -3212,8 +3211,6 @@ function SharedMediaModal({ conversation, onClose, onOpenMessage }) {
             </div>
           </div>
           <div className="shared-media-actions">
-            {item.url && <a className="secondary-button compact-action" href={item.url} target="_blank" rel="noreferrer">Abrir</a>}
-            {item.file?.url && <a className="secondary-button compact-action" href={item.url} target="_blank" rel="noreferrer" download={item.name}>Baixar</a>}
             <button type="button" className="primary-button compact-action" onClick={() => onOpenMessage(item)}>Ver na conversa</button>
           </div>
         </article>)}
