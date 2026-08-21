@@ -17,11 +17,13 @@ import { activity, chartData, contacts, departments, users } from "./data";
 const BRAND_NAME = "CIPOLATTI";
 const BRAND_SUBTITLE = "Central de Atendimento Corporativo";
 const BRAND_ICON = `${import.meta.env.BASE_URL}cipolatti-icon.png`;
-const FRONTEND_BUILD_VERSION = "2026.08.21.3";
+const FRONTEND_BUILD_VERSION = "2026.08.21.4";
 const DEFAULT_API_TIMEOUT_MS = 15000;
 const LOGIN_API_TIMEOUT_MS = 15000;
 const appLifecycle = { hiddenAt: 0, resumedAt: Date.now() };
 const MESSAGE_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "👏", "✅"];
+const PUSH_PROMPT_SNOOZE_MS = 7 * 24 * 60 * 60 * 1000;
+const PUSH_BLOCKED_NOTICE_SNOOZE_MS = 24 * 60 * 60 * 1000;
 const EMOJI_CATEGORIES = [
   { id: "recent", label: "Recentes", icon: "🕘", keywords: "" },
   { id: "faces", label: "Carinhas", icon: "😀", keywords: "feliz sorriso risada triste choro bravo raiva surpresa pensar sono abraco amor", emojis: "😀 😃 😄 😁 😂 🤣 😊 😍 🥰 😎 😉 😌 😋 😜 🤪 😇 🙂 🙃 😢 😭 😡 😠 😱 😨 🤔 🙄 😴 🤗 🥳 😬 😅 😮 😯 😲 😤 😭 😘 😚 😙 😗".split(" ") },
@@ -408,6 +410,11 @@ async function webPushDiagnostics() {
     displayMode: window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone ? "PWA instalada/standalone" : "Navegador",
   };
 }
+
+const pushPermissionLabelFromValue = (value) => value === "granted" ? "Permitida"
+  : value === "denied" ? "Bloqueada"
+  : value === "default" ? "Não solicitada"
+  : "Indisponível";
 
 async function sendWebPushTestNotification() {
   const subscription = await ensureWebPushSubscription();
@@ -1425,6 +1432,7 @@ function Topbar({ page, setPage, setMobileOpen, currentUser, theme, setTheme, on
           <input type="file" accept="image/jpeg,image/png,image/webp" onChange={async(event)=>{const file=event.target.files?.[0];event.target.value="";if(!file)return;try{const updated=await uploadImage(`/api/uploads/users/${currentUser.id}/photo`,file);onCurrentUserUpdated({...currentUser,...updated});setProfileToast("Foto interna atualizada.");}catch(error){setProfileToast(error.message)}}}/>
         </label>
         <div><strong>{currentUser.name}</strong></div>
+        <button className="icon-button profile-settings-button" onClick={() => setPage("configuracoes")} title="Preferências" aria-label="Abrir preferências"><Settings size={17}/></button>
         <button className="icon-button logout-button" onClick={onLogout} title="Sair"><LogOut size={17}/></button>
       </div>
       {noticesOpen && <div className="topbar-popover"><div className="popover-title"><strong>Notificações</strong>{notifications.some((item) => !item.read) && <button onClick={readAllNotifications}>Marcar todas como lidas</button>}</div>{notifications.length ? notifications.slice(0, 8).map((item) => <button key={item.id} className={item.read ? "read" : "unread"} onClick={() => readNotification(item)}><span>{item.title || item.message}</span><small>{item.createdAt ? new Date(item.createdAt).toLocaleString("pt-BR") : ""}</small></button>) : <p className="empty-popover">Nenhuma notificação recente.</p>}</div>}
@@ -4514,7 +4522,7 @@ function ProfileSettingsPage({ currentUser, theme, onThemeChange, onCurrentUserU
     : pushStatus === "denied" ? "Bloqueadas no navegador"
     : pushStatus === "unsupported" ? "Indisponíveis neste acesso"
     : "Não configuradas neste dispositivo";
-  const pushPermissionLabel = pushDiagnostic?.permission === "granted" ? "Permitida" : pushDiagnostic?.permission === "denied" ? "Bloqueada" : pushDiagnostic?.permission === "default" ? "Não solicitada" : "Indisponível";
+  const pushPermissionLabel = pushPermissionLabelFromValue(pushDiagnostic?.permission);
   const testPushNotification = async () => {
     setTestingPush(true);
     try {
@@ -4617,6 +4625,92 @@ function ProfileSettingsPage({ currentUser, theme, onThemeChange, onCurrentUserU
     </section>
     {toast && <Toast message={toast} tone={toast.includes("erro") ? "warning" : "success"} onClose={()=>setToast("")}/>}
   </div>;
+}
+
+function PushActivationModal({ currentUser, mode = "invite", onClose, onCurrentUserUpdated }) {
+  const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [message, setMessage] = useState("");
+  const [diagnostic, setDiagnostic] = useState(null);
+  const refreshDiagnostic = async () => {
+    const result = await webPushDiagnostics().catch(() => null);
+    setDiagnostic(result);
+    return result;
+  };
+  useEffect(() => { refreshDiagnostic(); }, []);
+  const persistNotificationPreference = async () => {
+    const nextPreferences = { ...(currentUser.preferences || {}), notifications: true, browserNotifications: true };
+    const result = await apiRequest("/api/profile", { method: "PUT", body: JSON.stringify({ preferences: nextPreferences }) });
+    if (result.user) onCurrentUserUpdated?.(result.user);
+  };
+  const activatePush = async () => {
+    setBusy(true);
+    setMessage("");
+    try {
+      await ensureWebPushSubscription();
+      await persistNotificationPreference();
+      await refreshDiagnostic();
+      setMessage("Notificações ativadas com sucesso.");
+    } catch (error) {
+      await refreshDiagnostic();
+      setMessage(error.message || "Não foi possível ativar notificações neste dispositivo.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const testPush = async () => {
+    setTesting(true);
+    setMessage("");
+    try {
+      const result = await sendWebPushTestNotification();
+      await refreshDiagnostic();
+      setMessage(`Push real enviado para este dispositivo. Status ${result.statusCode || "OK"}.`);
+    } catch (error) {
+      await refreshDiagnostic();
+      setMessage(error.message || "Não foi possível enviar o teste Web Push.");
+    } finally {
+      setTesting(false);
+    }
+  };
+  const permission = diagnostic?.permission || (browserNotificationsAvailable() ? Notification.permission : "unsupported");
+  const isBlocked = mode === "blocked" || permission === "denied";
+  const closeReason = isBlocked ? "blocked" : "later";
+  return createPortal(
+    <div className="modal-backdrop push-activation-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose?.(closeReason); }}>
+      <div className="modal push-activation-modal" role="dialog" aria-modal="true" aria-labelledby="push-activation-title">
+        <header>
+          <h2 id="push-activation-title">{isBlocked ? "NOTIFICAÇÕES BLOQUEADAS" : "ATIVAR NOTIFICAÇÕES"}</h2>
+          <button className="icon-button" type="button" aria-label="Fechar" onClick={() => onClose?.(closeReason)}><X size={18}/></button>
+        </header>
+        <div className="modal-body">
+          <div className="push-activation-hero"><Bell size={34}/></div>
+          {isBlocked
+            ? <p>Notificações estão bloqueadas neste dispositivo. Ative-as nas configurações do navegador/aplicativo para receber avisos de novas mensagens.</p>
+            : <p>Receba um aviso quando novas mensagens chegarem, mesmo quando o Chat estiver minimizado ou você estiver usando outro aplicativo.</p>}
+          <div className="push-diagnostic-grid push-activation-grid">
+            <span><strong>Push</strong><small>{diagnostic?.subscription ? "Ativo" : "Inativo"}</small></span>
+            <span><strong>Permissão</strong><small>{pushPermissionLabelFromValue(permission)}</small></span>
+            <span><strong>Subscription</strong><small>{diagnostic?.subscription ? "Registrada" : "Não registrada"}</small></span>
+            <span><strong>Service Worker</strong><small>{diagnostic?.serviceWorker ? "Ativo" : "Inativo"}</small></span>
+          </div>
+          <small className="push-diagnostic-note">{diagnostic?.displayMode || "Verificando dispositivo"} · No Android, confirme que o canal de notificações do PWA não está silencioso.</small>
+          {message && <div className={`push-activation-result ${message.includes("sucesso") || message.includes("enviado") ? "success" : "warning"}`}>{message}</div>}
+        </div>
+        <footer>
+          {isBlocked ? (
+            <button type="button" className="secondary-button" onClick={() => onClose?.("blocked")}>Entendi</button>
+          ) : (
+            <>
+              <button type="button" className="secondary-button" onClick={() => onClose?.("later")}>Agora não</button>
+              <button type="button" className="primary-button" disabled={busy} onClick={activatePush}><Bell size={15}/> {busy ? "Ativando..." : "Ativar notificações"}</button>
+            </>
+          )}
+          <button type="button" className="secondary-button" disabled={testing || isBlocked} onClick={testPush}>{testing ? "Testando..." : "Testar notificação"}</button>
+        </footer>
+      </div>
+    </div>,
+    document.body
+  );
 }
 
 function SettingsPage({ integration = false, currentUser, theme, onThemeChange, onCurrentUserUpdated, onLogout }) {
@@ -5354,6 +5448,7 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [authNotice,setAuthNotice]=useState("");
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState(null);
+  const [pushActivationPrompt, setPushActivationPrompt] = useState(null);
   const authRefreshPromiseRef = useRef(null);
   useEffect(() => {
     console.info(`CIPOLATTI frontend build: ${FRONTEND_BUILD_VERSION}`);
@@ -5422,6 +5517,31 @@ function App() {
     ensureWebPushSubscription().catch(() => {});
   }, [currentUser?.id, currentUser?.preferences?.notifications, currentUser?.preferences?.browserNotifications]);
   useEffect(() => {
+    if (!currentUser || !webPushAvailable()) return undefined;
+    let active = true;
+    const keyBase = currentUser.email || currentUser.username || currentUser.id;
+    const inviteKey = `cipolatti-push-invite-snooze-${keyBase}`;
+    const blockedKey = `cipolatti-push-blocked-snooze-${keyBase}`;
+    const run = async () => {
+      const status = await currentWebPushStatus().catch(() => "unsupported");
+      if (!active || status === "unsupported" || status === "subscribed") return;
+      const now = Date.now();
+      if (status === "denied") {
+        const blockedUntil = Number(localStorage.getItem(blockedKey) || 0);
+        if (now >= blockedUntil) setPushActivationPrompt({ mode: "blocked", inviteKey, blockedKey });
+        return;
+      }
+      const snoozedUntil = Number(localStorage.getItem(inviteKey) || 0);
+      if (now < snoozedUntil) return;
+      setPushActivationPrompt({ mode: "invite", inviteKey, blockedKey });
+    };
+    const timer = window.setTimeout(run, 1500);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [currentUser?.id]);
+  useEffect(() => {
     if (!currentUser) return;
     const params = new URLSearchParams(window.location.search);
     if (params.get("source") !== "push" || !params.get("conversationId")) return;
@@ -5458,6 +5578,11 @@ function App() {
   };
   const authenticate=(account)=>{setAuthNotice("");setCurrentUser(account);setPage("conversas")};
   const logout=async()=>{await removeWebPushSubscription().catch(()=>{});await apiRequest("/api/auth/logout",{method:"POST",body:"{}"}).catch(()=>{});setAuthNotice("");setCurrentUser(null);setPage("conversas")};
+  const closePushActivationPrompt = (reason) => {
+    if (reason === "blocked" && pushActivationPrompt?.blockedKey) localStorage.setItem(pushActivationPrompt.blockedKey, String(Date.now() + PUSH_BLOCKED_NOTICE_SNOOZE_MS));
+    if (reason === "later" && pushActivationPrompt?.inviteKey) localStorage.setItem(pushActivationPrompt.inviteKey, String(Date.now() + PUSH_PROMPT_SNOOZE_MS));
+    setPushActivationPrompt(null);
+  };
   useEffect(()=>{if(currentUser&&!canAccessPage(currentUser,page))setPage("conversas")},[currentUser,page]);
   const content = useMemo(() => {
     if(!currentUser)return null;
@@ -5480,6 +5605,7 @@ function App() {
     <div className="app-shell" data-theme={theme} data-message-font-size={messageFontSize}>
       <PresenceKeeper currentUser={currentUser} />
       {serviceWorkerUpdate && <div className="pwa-update-banner" role="status" aria-live="polite"><div><strong>Nova versão disponível</strong><span>O Chat | Cipolatti foi atualizado.</span></div><button type="button" className="primary-button" onClick={applyServiceWorkerUpdate}>Atualizar agora</button><button type="button" className="icon-button" aria-label="Ocultar atualização" onClick={() => setServiceWorkerUpdate(null)}><X size={16}/></button></div>}
+      {pushActivationPrompt && <PushActivationModal currentUser={currentUser} mode={pushActivationPrompt.mode} onClose={closePushActivationPrompt} onCurrentUserUpdated={setCurrentUser}/>}
       <Sidebar page={page} setPage={setPage} mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} currentUser={currentUser} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} />
       <div className="app-main">
         <Topbar page={page} setPage={setPage} setMobileOpen={setMobileOpen} currentUser={currentUser} theme={theme} setTheme={updateTheme} onLogout={logout} onCurrentUserUpdated={setCurrentUser} />
