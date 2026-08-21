@@ -2,7 +2,7 @@
   "name": "Chat | Cipolatti",
   "short_name": "Chat",
   "description": "Chat corporativo Cipolatti",
-  "start_url": "/?source=pwa-v3",
+  "start_url": "/?source=pwa-v4",
   "scope": "/",
   "display": "standalone",
   "background_color": "#ffffff",

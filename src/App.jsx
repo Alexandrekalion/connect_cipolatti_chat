@@ -17,7 +17,7 @@ import { activity, chartData, contacts, departments, users } from "./data";
 const BRAND_NAME = "CIPOLATTI";
 const BRAND_SUBTITLE = "Central de Atendimento Corporativo";
 const BRAND_ICON = `${import.meta.env.BASE_URL}cipolatti-icon.png`;
-const FRONTEND_BUILD_VERSION = "2026.07.27.1";
+const FRONTEND_BUILD_VERSION = "2026.08.21.3";
 const DEFAULT_API_TIMEOUT_MS = 15000;
 const LOGIN_API_TIMEOUT_MS = 15000;
 const appLifecycle = { hiddenAt: 0, resumedAt: Date.now() };
@@ -413,6 +413,54 @@ async function sendWebPushTestNotification() {
   const subscription = await ensureWebPushSubscription();
   const endpoint = subscription.endpoint;
   return apiRequest("/api/push/test", { method: "POST", body: JSON.stringify({ endpoint }) });
+}
+
+function monitorServiceWorkerUpdates({ onUpdateReady } = {}) {
+  if (!("serviceWorker" in navigator) || !window.isSecureContext) return () => {};
+  let registrationRef = null;
+  let disposed = false;
+  let refreshing = false;
+  const swUrl = `${import.meta.env.BASE_URL}notification-sw.js`;
+  const notifyWaiting = (registration) => {
+    if (registration?.waiting && navigator.serviceWorker.controller) onUpdateReady?.(registration);
+  };
+  const watchInstalling = (registration) => {
+    const worker = registration.installing;
+    if (!worker) return;
+    worker.addEventListener("statechange", () => {
+      if (!disposed && worker.state === "installed") notifyWaiting(registration);
+    });
+  };
+  navigator.serviceWorker.register(swUrl).then((registration) => {
+    if (disposed) return;
+    registrationRef = registration;
+    notifyWaiting(registration);
+    registration.addEventListener("updatefound", () => watchInstalling(registration));
+    registration.update().catch(() => {});
+  }).catch(() => {});
+  const requestUpdate = () => registrationRef?.update?.().catch(() => {});
+  const onVisible = () => {
+    if (document.visibilityState === "visible") requestUpdate();
+  };
+  const onOnline = () => requestUpdate();
+  const onControllerChange = () => {
+    if (refreshing) return;
+    refreshing = true;
+    window.location.reload();
+  };
+  document.addEventListener("visibilitychange", onVisible);
+  window.addEventListener("focus", requestUpdate);
+  window.addEventListener("online", onOnline);
+  navigator.serviceWorker.addEventListener("controllerchange", onControllerChange);
+  const timer = window.setInterval(requestUpdate, 30 * 60 * 1000);
+  return () => {
+    disposed = true;
+    document.removeEventListener("visibilitychange", onVisible);
+    window.removeEventListener("focus", requestUpdate);
+    window.removeEventListener("online", onOnline);
+    navigator.serviceWorker.removeEventListener("controllerchange", onControllerChange);
+    window.clearInterval(timer);
+  };
 }
 
 function normalizePresenceStatus(value = "") {
@@ -4564,6 +4612,7 @@ function ProfileSettingsPage({ currentUser, theme, onThemeChange, onCurrentUserU
       <article className="panel profile-modern-card"><div className="settings-heading"><span className="large-setting-icon"><Bell/></span><div><h2>Preferências</h2><p>Tema, idioma e notificações.</p></div></div><div className="form-grid"><fieldset className="theme-choice"><legend>Tema</legend><label><input type="radio" name="profile-theme" value="light" checked={(form.preferences.theme || "light") === "light"} onChange={(event)=>changeTheme(event.target.value)}/> Claro</label><label><input type="radio" name="profile-theme" value="dark" checked={form.preferences.theme === "dark"} onChange={(event)=>changeTheme(event.target.value)}/> Escuro</label></fieldset><label><span>Idioma</span><select value={form.preferences.language || "pt-BR"} onChange={(event)=>setForm({...form,preferences:{...form.preferences,language:event.target.value}})}><option value="pt-BR">Português</option></select></label><fieldset className="message-font-size-choice"><legend>Tamanho da fonte das mensagens</legend>{MESSAGE_FONT_SIZE_OPTIONS.map((option)=><label key={option.value}><input type="radio" name="message-font-size" value={option.value} checked={(form.preferences.messageFontSize || "default") === option.value} onChange={(event)=>savePreferencePatch({messageFontSize:event.target.value})}/><span>{option.label}</span><small>{option.size}</small></label>)}</fieldset><label className="check-row"><input type="checkbox" checked={form.preferences.notifications !== false} onChange={(event)=>savePreferencePatch({notifications:event.target.checked})}/> Receber notificações internas</label></div><div className="notification-preferences"><div className="notification-permission"><div><strong>Notificações do navegador</strong><span>{notificationStatus}</span><small>{pushStatusLabel}</small></div><button className="secondary-button" type="button" onClick={requestNotifications} disabled={pushStatus === "subscribed"}><Bell size={15}/> {pushStatus === "subscribed" ? "Push ativado" : "Ativar notificações push"}</button><button className="secondary-button" type="button" onClick={testPushNotification} disabled={testingPush}><Bell size={15}/> {testingPush ? "Testando..." : "Testar notificação"}</button></div><div className="push-diagnostic-grid"><span><strong>Push</strong><small>{pushStatus === "subscribed" ? "Ativo" : "Inativo"}</small></span><span><strong>Permissão</strong><small>{pushPermissionLabel}</small></span><span><strong>Subscription</strong><small>{pushDiagnostic?.subscription ? "Registrada" : "Não registrada"}</small></span><span><strong>Service Worker</strong><small>{pushDiagnostic?.serviceWorker ? "Ativo" : "Inativo"}</small></span></div><small className="push-diagnostic-note">{pushDiagnostic?.displayMode || "Verificando dispositivo"} · No Android, som e tela bloqueada dependem da permissão e do canal de notificações do PWA no sistema.</small><Toggle label="Mostrar conteúdo da mensagem" description="Exibe remetente e prévia quando o navegador mostrar o aviso." checked={form.preferences.showNotificationContent !== false} onChange={(value)=>savePreferencePatch({showNotificationContent:value})}/><Toggle label="Som de nova mensagem" description="Toca um alerta discreto em intervalos controlados." checked={form.preferences.notificationSound === true} onChange={(value)=>savePreferencePatch({notificationSound:value})}/><Toggle label="Piscar/contador da janela" description="Mantém contador no título enquanto houver mensagens pendentes." checked={form.preferences.flashWindowTitle !== false} onChange={(value)=>savePreferencePatch({flashWindowTitle:value})}/><Toggle label="Notificações do Windows" description="Usa avisos nativos do navegador quando permitido." checked={form.preferences.browserNotifications !== false} onChange={(value)=>savePreferencePatch({browserNotifications:value})}/><Toggle label="Repetir alerta até leitura" description="Repete o banner e o aviso a cada 60 segundos enquanto a conversa não for aberta." checked={form.preferences.repeatAlertsUntilRead !== false} onChange={(value)=>savePreferencePatch({repeatAlertsUntilRead:value})}/><Toggle label="Não perturbe" description="Silencia banners, sons e avisos persistentes temporariamente." checked={form.preferences.doNotDisturb === true} onChange={(value)=>savePreferencePatch({doNotDisturb:value})}/><div className="quiet-hours-fields"><label><span>Horário silencioso início</span><input type="time" value={form.preferences.quietHoursStart || ""} onChange={(event)=>savePreferencePatch({quietHoursStart:event.target.value})}/></label><label><span>Horário silencioso fim</span><input type="time" value={form.preferences.quietHoursEnd || ""} onChange={(event)=>savePreferencePatch({quietHoursEnd:event.target.value})}/></label></div><Toggle label="Notificar mensagens individuais" description="Avisar novas conversas diretas quando esta aba estiver em segundo plano." checked={form.preferences.notifyDirectMessages !== false} onChange={(value)=>savePreferencePatch({notifyDirectMessages:value})}/><Toggle label="Notificar grupos" description="Avisar novas mensagens de grupos dos quais você participa." checked={form.preferences.notifyGroups !== false} onChange={(value)=>savePreferencePatch({notifyGroups:value})}/></div></article>
       <article className="panel profile-modern-card out-of-office-card"><div className="settings-heading"><span className="large-setting-icon"><Clock3/></span><div><h2>Fora da empresa</h2><p>Resposta automática para conversas privadas durante ausências programadas.</p></div></div><div className="out-of-office-status"><Status>{outOfOffice.label || "Desativado"}</Status></div><div className="form-grid"><label className="check-row full"><input type="checkbox" checked={outOfOffice.enabled} onChange={(event)=>setOutOfOffice({...outOfOffice,enabled:event.target.checked})}/> Ativar “Fora da empresa”</label><label><span>Data e hora de início</span><input type="datetime-local" value={outOfOffice.startAt} onChange={(event)=>setOutOfOffice({...outOfOffice,startAt:event.target.value})}/></label><label><span>Data e hora de retorno</span><input type="datetime-local" value={outOfOffice.endAt} onChange={(event)=>setOutOfOffice({...outOfOffice,endAt:event.target.value})}/></label><label className="full"><span>Mensagem automática</span><textarea maxLength={1000} value={outOfOffice.message} onChange={(event)=>setOutOfOffice({...outOfOffice,message:event.target.value})} placeholder="Olá! Estou fora da empresa e retornarei em breve. Em caso de urgência, entre em contato com meu departamento."/></label></div><div className="out-of-office-actions"><small>{outOfOffice.message.length}/1000 caracteres · respostas automáticas são enviadas uma vez por conversa a cada 24 horas.</small><div><button type="button" className="secondary-button" disabled={savingOutOfOffice} onClick={disableOutOfOffice}>Desativar agora</button><button type="button" className="primary-button" disabled={savingOutOfOffice} onClick={saveOutOfOffice}><Save size={16}/> {savingOutOfOffice ? "Salvando..." : "Salvar"}</button></div></div></article>
       <article className="panel profile-modern-card"><div className="settings-heading"><span className="large-setting-icon"><ShieldCheck/></span><div><h2>Segurança</h2><p>Acesso local e Active Directory.</p></div></div><div className="security-banner profile-security-banner"><ShieldCheck/><div><strong>Manter conectado</strong><span>Sessões persistentes usam token seguro, validação no AD e rotação automática.</span></div></div><div className="security-banner profile-security-banner muted"><KeyRound/><div><strong>Active Directory</strong><span>A senha é gerenciada pelo AD e nunca fica armazenada no CIPOLATTI CHAT.</span></div></div><button className="danger-button full-width-security-action" onClick={logoutEverywhere}>Sair de todos os dispositivos</button></article>
+      <article className="panel profile-modern-card about-build-card"><div className="settings-heading"><span className="large-setting-icon"><MonitorUp/></span><div><h2>Sobre</h2><p>Versão instalada neste dispositivo.</p></div></div><div className="about-build-info"><span>Frontend</span><strong>{FRONTEND_BUILD_VERSION}</strong><small>Service worker: atualização controlada com aviso no aplicativo.</small></div></article>
       {currentUser.role==="Administrador"&&<PersistentSessionsPanel/>}
     </section>
     {toast && <Toast message={toast} tone={toast.includes("erro") ? "warning" : "success"} onClose={()=>setToast("")}/>}
@@ -5304,14 +5353,19 @@ function App() {
   const [theme, setTheme] = useState("light");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [authNotice,setAuthNotice]=useState("");
+  const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState(null);
   const authRefreshPromiseRef = useRef(null);
   useEffect(() => {
     console.info(`CIPOLATTI frontend build: ${FRONTEND_BUILD_VERSION}`);
   }, []);
   useEffect(() => {
-    if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
-    navigator.serviceWorker.register(`${import.meta.env.BASE_URL}notification-sw.js`).catch(() => {});
+    return monitorServiceWorkerUpdates({ onUpdateReady: setServiceWorkerUpdate });
   }, []);
+  const applyServiceWorkerUpdate = () => {
+    const worker = serviceWorkerUpdate?.waiting;
+    if (!worker) return setServiceWorkerUpdate(null);
+    worker.postMessage({ type: "CIPOLATTI_SKIP_WAITING" });
+  };
   const openConversationFromPush = (detail = {}) => {
     const conversationId = detail.conversationId || "";
     if (!conversationId) return;
@@ -5425,6 +5479,7 @@ function App() {
   return (
     <div className="app-shell" data-theme={theme} data-message-font-size={messageFontSize}>
       <PresenceKeeper currentUser={currentUser} />
+      {serviceWorkerUpdate && <div className="pwa-update-banner" role="status" aria-live="polite"><div><strong>Nova versão disponível</strong><span>O Chat | Cipolatti foi atualizado.</span></div><button type="button" className="primary-button" onClick={applyServiceWorkerUpdate}>Atualizar agora</button><button type="button" className="icon-button" aria-label="Ocultar atualização" onClick={() => setServiceWorkerUpdate(null)}><X size={16}/></button></div>}
       <Sidebar page={page} setPage={setPage} mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} currentUser={currentUser} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} />
       <div className="app-main">
         <Topbar page={page} setPage={setPage} setMobileOpen={setMobileOpen} currentUser={currentUser} theme={theme} setTheme={updateTheme} onLogout={logout} onCurrentUserUpdated={setCurrentUser} />

@@ -1,11 +1,25 @@
-self.CIPOLATTI_CHAT_SW_VERSION = "20260821-web-push-v2";
+self.CIPOLATTI_CHAT_SW_VERSION = "20260821-pwa-update-v1";
+self.CIPOLATTI_CHAT_CACHE_PREFIX = "cipolatti-chat-";
+self.CIPOLATTI_CHAT_CACHE_NAME = `${self.CIPOLATTI_CHAT_CACHE_PREFIX}${self.CIPOLATTI_CHAT_SW_VERSION}`;
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(self.skipWaiting());
+  event.waitUntil(Promise.resolve());
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    self.caches.keys()
+      .then((keys) => Promise.all(keys
+        .filter((key) => key.startsWith(self.CIPOLATTI_CHAT_CACHE_PREFIX) && key !== self.CIPOLATTI_CHAT_CACHE_NAME)
+        .map((key) => self.caches.delete(key))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "CIPOLATTI_SKIP_WAITING") {
+    event.waitUntil(self.skipWaiting());
+  }
 });
 
 function parsePushPayload(event) {
