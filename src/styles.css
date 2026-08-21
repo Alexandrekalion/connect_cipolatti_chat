@@ -1403,7 +1403,7 @@ body,
   position: relative;
   min-height: 64px;
   display: grid;
-  grid-template-columns: 40px minmax(180px, 1fr) 132px 38px;
+  grid-template-columns: minmax(0, 1fr) 132px;
   gap: 12px;
   align-items: center;
   padding: 10px 10px;
@@ -1412,7 +1412,15 @@ body,
   background: rgba(255,255,255,.025);
 }
 
-.participant-modal-row .avatar-sm {
+.participant-card-head {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 38px;
+  gap: 12px;
+  align-items: center;
+}
+
+.participant-card-head .avatar-sm {
   width: 40px;
   height: 40px;
   font-size: 10px;
@@ -1547,35 +1555,45 @@ body,
     scrollbar-gutter: auto;
   }
   .participant-modal-row {
-    grid-template-columns: 40px minmax(0, 1fr) 40px;
-    grid-template-rows: auto auto;
-    gap: 7px 9px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     min-height: 0;
     height: auto;
-    padding: 11px 10px;
+    padding: 12px;
+    align-items: stretch;
+    overflow: visible;
+  }
+  .participant-card-head {
+    grid-template-columns: 42px minmax(0, 1fr) 40px;
+    gap: 10px;
     align-items: start;
+  }
+  .participant-card-head .avatar-sm {
+    width: 42px;
+    height: 42px;
   }
   .participant-modal-row strong,
   .participant-modal-row small {
     white-space: normal;
     overflow-wrap: anywhere;
+    word-break: break-word;
   }
   .participant-main {
     padding-top: 1px;
   }
   .participant-role-badge {
-    grid-column: 2 / 3;
-    grid-row: 2 / 3;
     width: max-content;
     min-width: 118px;
     max-width: 100%;
-    padding: 0 12px;
-    justify-self: start;
+    min-height: 28px;
+    height: auto;
+    padding: 6px 12px;
+    align-self: flex-start;
   }
   .participant-menu-wrap {
-    grid-column: 3 / 4;
-    grid-row: 1 / 2;
     align-self: start;
+    justify-self: end;
   }
   .participant-menu {
     position: absolute;
@@ -2633,14 +2651,15 @@ body.attachment-modal-open .modal-backdrop {
 .shared-media-tabs { display: flex; gap: 6px; overflow-x: auto; }
 .shared-media-tabs button { height: 30px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--muted); padding: 0 10px; cursor: pointer; white-space: nowrap; }
 .shared-media-tabs button.active { background: var(--soft); color: var(--text-strong); border-color: rgba(196,154,44,.55); }
-.shared-media-list { min-height: 0; flex: 1 1 auto; display: grid; align-content: start; gap: 8px; overflow-y: auto; padding-right: 6px; scrollbar-gutter: stable; }
-.shared-media-item { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 70px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.025); }
+.shared-media-list { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; overflow-x: hidden; padding-right: 6px; scrollbar-gutter: stable; }
+.shared-media-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 70px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.025); }
+.shared-media-card-main { min-width: 0; display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 12px; align-items: center; }
 .shared-media-preview { width: 56px; height: 50px; border-radius: 6px; background: var(--soft); display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .shared-media-preview img { width: 100%; height: 100%; object-fit: cover; }
-.shared-media-item strong,.shared-media-item span,.shared-media-item small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.shared-media-item span,.shared-media-item small { color: var(--muted); font-size: 10px; margin-top: 3px; }
+.shared-media-info { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.shared-media-info strong,.shared-media-info span,.shared-media-info small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shared-media-info span,.shared-media-info small { color: var(--muted); font-size: 10px; }
 .shared-media-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-@media(max-width:760px){.shared-media-item{grid-template-columns:46px minmax(0,1fr)}.shared-media-actions{grid-column:1/-1;justify-content:flex-start}.modal.shared-media-modal-shell{width:calc(100vw - 18px);height:92dvh}}
 .system-message-out-of-office{display:grid;gap:5px;border:1px solid rgba(196,154,44,.45);background:rgba(196,154,44,.1);text-align:left}
 .system-message-out-of-office strong{font-size:10px;color:#e2bd67;text-transform:uppercase;letter-spacing:.02em}
 .system-message.message-located{animation:locatedMessagePulse 3s ease-out;box-shadow:0 0 0 2px rgba(196,154,44,.72),0 0 28px rgba(196,154,44,.28)}
@@ -2769,17 +2788,19 @@ body.attachment-modal-open .modal-backdrop {
   .modal.new-conversation-shell, .modal.shared-media-modal-shell, .modal.add-participants-modal-shell, .modal.attachment-modal-shell { width: 100%; height: 92dvh; max-height: 92dvh; }
   .new-conversation-scroll, .add-participants-list, .shared-media-list { max-height: none; overflow-x: hidden; }
   .new-conversation-table tr, .collaborator-directory-table tr { min-height: 64px; }
-  .new-conversation-table .compact-action, .add-participant-row, .shared-media-actions button { min-height: 44px; }
+  .new-conversation-table .compact-action, .add-participant-row, .shared-media-actions button, .shared-media-actions a { min-height: 44px; }
   .modal.shared-media-modal-shell { width: min(96vw, 460px); height: calc(100dvh - 16px); max-height: calc(100dvh - 16px); }
   .modal.shared-media-modal-shell>.modal-body { padding: 12px; overflow: hidden; }
-  .shared-media-modal { gap: 10px; }
+  .shared-media-modal { gap: 10px; min-width: 0; }
   .shared-media-tabs { overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; scrollbar-width: thin; }
-  .shared-media-list { overflow-y: auto; overflow-x: hidden; padding-right: 2px; }
-  .shared-media-item { grid-template-columns: 52px minmax(0,1fr); align-items: start; min-height: 0; height: auto; padding: 12px; gap: 10px; }
-  .shared-media-preview { width: 52px; height: 52px; }
-  .shared-media-item strong,.shared-media-item span,.shared-media-item small { white-space: normal; overflow-wrap: anywhere; }
-  .shared-media-actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; justify-content: stretch; gap: 7px; }
-  .shared-media-actions button, .shared-media-actions a { width: 100%; min-height: 40px; justify-content: center; }
+  .shared-media-list { display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; padding: 0 2px 2px 0; gap: 10px; }
+  .shared-media-item { display: flex; flex-direction: column; align-items: stretch; min-height: 0; height: auto; padding: 12px; gap: 10px; overflow: visible; }
+  .shared-media-card-main { display: grid; grid-template-columns: 56px minmax(0,1fr); align-items: start; gap: 10px; min-width: 0; }
+  .shared-media-preview { width: 56px; height: 56px; }
+  .shared-media-info { min-width: 0; gap: 4px; }
+  .shared-media-info strong,.shared-media-info span,.shared-media-info small { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; word-break: break-word; line-height: 1.25; }
+  .shared-media-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); justify-content: stretch; gap: 8px; }
+  .shared-media-actions button, .shared-media-actions a { width: 100%; min-height: 40px; justify-content: center; text-align: center; white-space: normal; }
   .shared-media-actions .primary-button { grid-column: 1 / -1; }
   .shared-media-tabs button { min-height: 38px; font-size: 12px; }
 
@@ -3835,6 +3856,7 @@ body.attachment-modal-open .modal-backdrop {
 .attachment-caption,
 .attachment-modal-file,
 .shared-media-item,
+.shared-media-card-main,
 .shared-media-info {
   min-width: 0;
   max-width: 100%;
@@ -3852,9 +3874,9 @@ body.attachment-modal-open .modal-backdrop {
 .file-attachment span,
 .attachment-modal-file strong,
 .attachment-modal-file span,
-.shared-media-item strong,
-.shared-media-item span,
-.shared-media-item a {
+.shared-media-info strong,
+.shared-media-info span,
+.shared-media-info small {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;

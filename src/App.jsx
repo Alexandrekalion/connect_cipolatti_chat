@@ -17,7 +17,7 @@ import { activity, chartData, contacts, departments, users } from "./data";
 const BRAND_NAME = "CIPOLATTI";
 const BRAND_SUBTITLE = "Central de Atendimento Corporativo";
 const BRAND_ICON = `${import.meta.env.BASE_URL}cipolatti-icon.png`;
-const FRONTEND_BUILD_VERSION = "2026.08.21.6";
+const FRONTEND_BUILD_VERSION = "2026.08.21.7";
 const DEFAULT_API_TIMEOUT_MS = 15000;
 const LOGIN_API_TIMEOUT_MS = 15000;
 const appLifecycle = { hiddenAt: 0, resumedAt: Date.now() };
@@ -3186,14 +3186,14 @@ function SharedMediaModal({ conversation, onClose, onOpenMessage }) {
   const [tab, setTab] = useState("todos");
   const [query, setQuery] = useState("");
   const items = useMemo(() => sharedMediaItems(conversation), [conversation]);
-  const tabs = [["todos", "Todos"], ["image", "Fotos"], ["video", "Videos"], ["audio", "Audios"], ["document", "Documentos"], ["link", "Links"]];
+  const tabs = [["todos", "Todos"], ["image", "Fotos"], ["video", "Vídeos"], ["audio", "Áudios"], ["document", "Documentos"], ["link", "Links"]];
   const filtered = items.filter((item) => {
     const kind = ["pdf", "word", "sheet", "presentation", "archive", "technical", "document"].includes(item.kind) ? "document" : item.kind;
     const matchesTab = tab === "todos" || kind === tab;
     const haystack = normalizeSearchText([item.name, item.extension, item.sender, item.kind, item.createdAt].filter(Boolean).join(" "));
     return matchesTab && (!query.trim() || haystack.includes(normalizeSearchText(query).trim()));
   });
-  return <Modal title="Midias compartilhadas" className="shared-media-modal-shell" onClose={onClose} footer={<button className="primary-button" onClick={onClose}>Fechar</button>}>
+  return <Modal title="Mídias compartilhadas" className="shared-media-modal-shell" onClose={onClose} footer={<button className="primary-button" onClick={onClose}>Fechar</button>}>
     <div className="shared-media-modal">
       <div className="shared-media-toolbar">
         <label className="list-search"><Search size={16}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar por nome, tipo, data ou remetente" autoFocus /></label>
@@ -3201,15 +3201,22 @@ function SharedMediaModal({ conversation, onClose, onOpenMessage }) {
       </div>
       <div className="shared-media-list">
         {filtered.map((item) => <article className={`shared-media-item shared-media-${item.kind}`} key={item.attachmentId || item.messageId}>
-          <div className="shared-media-preview">{item.kind === "image" && item.url ? <img src={item.url} alt="" /> : item.kind === "video" ? <Video size={20}/> : item.kind === "audio" ? <Mic size={20}/> : item.kind === "link" ? <Webhook size={20}/> : <AttachmentIcon category={item.kind} />}</div>
-          <div><strong title={item.name}>{item.name}</strong><span>{item.sender || "Remetente"} - {item.createdAt ? new Date(item.createdAt).toLocaleString("pt-BR") : "Data indisponivel"}</span>{item.size ? <small>{formatFileSize(item.size)}{item.extension ? ` - ${String(item.extension).toUpperCase()}` : ""}</small> : null}</div>
+          <div className="shared-media-card-main">
+            <div className="shared-media-preview">{item.kind === "image" && item.url ? <img src={item.url} alt="" /> : item.kind === "video" ? <Video size={20}/> : item.kind === "audio" ? <Mic size={20}/> : item.kind === "link" ? <Webhook size={20}/> : <AttachmentIcon category={item.kind} />}</div>
+            <div className="shared-media-info">
+              <strong title={item.name}>{item.name}</strong>
+              <span>{item.sender || "Remetente"}</span>
+              <span>{item.createdAt ? new Date(item.createdAt).toLocaleString("pt-BR") : "Data indisponível"}</span>
+              {(item.size || item.extension) ? <small>{item.size ? formatFileSize(item.size) : "Tamanho indisponível"}{item.extension ? ` • ${String(item.extension).toUpperCase()}` : ""}</small> : null}
+            </div>
+          </div>
           <div className="shared-media-actions">
             {item.url && <a className="secondary-button compact-action" href={item.url} target="_blank" rel="noreferrer">Abrir</a>}
             {item.file?.url && <a className="secondary-button compact-action" href={item.url} target="_blank" rel="noreferrer" download={item.name}>Baixar</a>}
             <button type="button" className="primary-button compact-action" onClick={() => onOpenMessage(item)}>Ver na conversa</button>
           </div>
         </article>)}
-        {!filtered.length && <div className="empty-result">Nenhuma midia encontrada.</div>}
+        {!filtered.length && <div className="empty-result">Nenhuma mídia encontrada.</div>}
       </div>
     </div>
   </Modal>;
@@ -3353,19 +3360,21 @@ function ParticipantsModal({ conversation, directory = [], currentUser, onAction
           const isOpen = openMenu === menuKey;
           const openUp = participantUsers.length > 5 && index >= participantUsers.length - 3;
           return <div className="participant-modal-row" key={user.id || user.name} role="listitem">
-            <Avatar initials={user.initials || "CP"} size="sm" src={user.photoUrl} alt={user.name}/>
-            <span className="participant-main">
-              <strong title={user.name}>{user.name}</strong>
-              <small title={detail}>{detail}</small>
-            </span>
-            <span className={`participant-role-badge participant-role-${role}`}>{roleText(role)}</span>
-            <div className="participant-menu-wrap" onClick={(event) => event.stopPropagation()}>
-              <button type="button" className="icon-button participant-menu-button" aria-label={`Ações de ${user.name}`} aria-haspopup="menu" aria-expanded={isOpen} aria-controls={menuId} onClick={() => setOpenMenu(isOpen ? null : menuKey)}><span aria-hidden="true" className="participant-menu-dots">⋮</span></button>
-              {isOpen && <div id={menuId} className={`participant-menu ${openUp ? "participant-menu-up" : ""}`} role="menu">
-                <button type="button" role="menuitem" onClick={() => runAction(user, "profile")}>Ver perfil</button>
-                {actions.map(([action, label]) => <button type="button" role="menuitem" key={action} className={action === "remove" ? "danger-option" : ""} onClick={() => runAction(user, action)}>{label}</button>)}
-              </div>}
+            <div className="participant-card-head">
+              <Avatar initials={user.initials || "CP"} size="sm" src={user.photoUrl} alt={user.name}/>
+              <span className="participant-main">
+                <strong title={user.name}>{user.name}</strong>
+                <small title={detail}>{detail}</small>
+              </span>
+              <div className="participant-menu-wrap" onClick={(event) => event.stopPropagation()}>
+                <button type="button" className="icon-button participant-menu-button" aria-label={`Ações de ${user.name}`} aria-haspopup="menu" aria-expanded={isOpen} aria-controls={menuId} onClick={() => setOpenMenu(isOpen ? null : menuKey)}><span aria-hidden="true" className="participant-menu-dots">⋮</span></button>
+                {isOpen && <div id={menuId} className={`participant-menu ${openUp ? "participant-menu-up" : ""}`} role="menu">
+                  <button type="button" role="menuitem" onClick={() => runAction(user, "profile")}>Ver perfil</button>
+                  {actions.map(([action, label]) => <button type="button" role="menuitem" key={action} className={action === "remove" ? "danger-option" : ""} onClick={() => runAction(user, action)}>{label}</button>)}
+                </div>}
+              </div>
             </div>
+            <span className={`participant-role-badge participant-role-${role}`}>{roleText(role)}</span>
           </div>;
         })}
       </div>
